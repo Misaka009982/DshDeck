@@ -1,0 +1,56 @@
+name: Windows 安装包构建
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/**'
+      - 'tools/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig*.json'
+      - 'electron-builder.json'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-installer-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-windows:
+    name: 构建 Windows x64 安装包
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # 固定 v4 提交
+        with:
+          persist-credentials: false
+
+      - name: 准备 Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # 固定 v4 提交
+        with:
+          node-version: '24.10.0'
+
+      # 当前仓库没有锁文件，不能使用 npm ci；不回写 CI 生成的锁文件。
+      - name: 安装构建依赖
+        run: npm install
+
+      - name: 构建 Windows x64 安装包
+        run: npm run package:win
+
+      - name: 上传 EXE 安装包
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # 固定 v4 提交
+        with:
+          name: DshDeck-Windows-x64-${{ github.run_number }}-${{ github.run_attempt }}
+          path: release/DshDeck-Setup-*-x64.exe
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0

@@ -37,6 +37,7 @@ export function MessageList({ view, mode, onRead }: Props) {
         </article>
       ))}
       {view.events.length === 0 && view.assistant.activeAttempt === null && <div className="conversation-empty">{view.status === 'loading' ? '首次读取会话…' : view.failure !== null ? '会话暂不可读。可以重试、重新登录或打开兼容页面。' : '这个会话没有已加载的消息。'}</div>}
+      {mode === 'conversation' && view.events.length > 0 && messages.length === 0 && view.assistant.activeAttempt === null && <div className="conversation-empty">已读取 {view.events.length} 条记录，当前没有可显示的标准对话；可切换到事件查看，插件界面请使用原网页。</div>}
       {mode === 'output' && messages.length === 0 && <p className="muted">当前缓存中没有工具输出。</p>}
       <div ref={end} className="read-sentinel" aria-hidden="true" />
     </div>

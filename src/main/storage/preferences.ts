@@ -1,5 +1,7 @@
 import type { SessionPreference, WorkbenchSettings } from '../../shared/domain.js';
-import { ProtocolFault, requireKeys, requireRecord } from '../../shared/faults.js';
+import type { AppearanceSettings } from '../../shared/appearance.js';
+import { DEFAULT_APPEARANCE, parseAppearance, parseAppearancePatch } from '../../shared/appearance.js';
+import { ProtocolFault, requireId, requireKeys, requireRecord } from '../../shared/faults.js';
 import { readJson, writeJson } from './json-file.js';
 
 export const DEFAULT_SETTINGS: WorkbenchSettings = {
@@ -12,11 +14,15 @@ interface PreferenceData {
   readonly sessions: Readonly<Record<string, SessionPreference>>;
   readonly petRuntimeRoot: string | null;
   readonly petResourceRoot: string | null;
+  readonly petSelectionId: string | null;
+  readonly appearance: AppearanceSettings;
+  readonly backgroundPath: string | null;
 }
 
 /** 只保存关注、阅读水位与界面偏好；草稿、正文和认证材料不写磁盘。 */
 export class Preferences {
-  private data: PreferenceData = { version: 1, settings: { ...DEFAULT_SETTINGS }, sessions: {}, petRuntimeRoot: null, petResourceRoot: null };
+  private data: PreferenceData = { version: 1, settings: { ...DEFAULT_SETTINGS }, sessions: {}, petRuntimeRoot: null, petResourceRoot: null, petSelectionId: null,
+    appearance: parseAppearance(DEFAULT_APPEARANCE), backgroundPath: null };
   private writing: Promise<void> = Promise.resolve();
   constructor(private readonly path: string, private readonly onChange: () => void = () => {},
     private readonly persist: (path: string, value: unknown, maxBytes: number) => Promise<void> = writeJson) {}
@@ -24,7 +30,7 @@ export class Preferences {
     const value = await readJson(this.path, 2 * 1024 * 1024);
     if (value === undefined) return;
     const data = requireRecord(value);
-    requireKeys(data, ['version', 'settings', 'sessions', 'petRuntimeRoot', 'petResourceRoot']);
+    requireKeys(data, ['version', 'settings', 'sessions', 'petRuntimeRoot', 'petResourceRoot'], ['petSelectionId', 'appearance', 'backgroundPath']);
     if (data.version !== 1) throw new ProtocolFault('unsupported');
     const sessions = requireRecord(data.sessions);
     if (Object.keys(sessions).length > 10000) throw new ProtocolFault('budget');
@@ -36,15 +42,30 @@ export class Preferences {
     this.data = {
       version: 1, settings: parseSettings(data.settings), sessions: checked,
       petRuntimeRoot: parseLocalPath(data.petRuntimeRoot), petResourceRoot: parseLocalPath(data.petResourceRoot),
+      petSelectionId: data.petSelectionId === undefined || data.petSelectionId === null ? null : requireId(data.petSelectionId),
+      appearance: parseAppearance(data.appearance ?? DEFAULT_APPEARANCE), backgroundPath: data.backgroundPath === undefined ? null : parseLocalPath(data.backgroundPath),
     };
   }
   settings(): WorkbenchSettings { return { ...this.data.settings }; }
+  appearance(): AppearanceSettings { return parseAppearance(this.data.appearance); }
+  backgroundPath(): string | null { return this.data.backgroundPath; }
+  updateAppearance(value: unknown): Promise<void> {
+    const patch = parseAppearancePatch(value);
+    return this.mutate(data => ({ ...data, appearance: parseAppearance({ ...data.appearance, ...patch }) }));
+  }
+  setBackgroundPath(value: string | null): Promise<void> {
+    const backgroundPath = parseLocalPath(value);
+    return this.mutate(data => ({ ...data, backgroundPath, appearance: { ...data.appearance, backgroundEnabled: backgroundPath !== null,
+      crop: backgroundPath === data.backgroundPath ? data.appearance.crop : { ...DEFAULT_APPEARANCE.crop } } }));
+  }
   session(key: string): SessionPreference { return { ...(this.data.sessions[key] ?? DEFAULT_SESSION) }; }
   hasSession(key: string): boolean { return Object.hasOwn(this.data.sessions, key); }
   petPaths(): { runtimeRoot: string | null; resourceRoot: string | null } { return { runtimeRoot: this.data.petRuntimeRoot, resourceRoot: this.data.petResourceRoot }; }
-  updateSettings(value: unknown): Promise<void> {
-    const settings = parseSettings(value);
-    return this.mutate(data => ({ ...data, settings }));
+  petSelection(): string | null { return this.data.petSelectionId; }
+  setPetSelection(value: string | null): Promise<void> { const id = value === null ? null : requireId(value); return this.mutate(data => ({ ...data, petSelectionId: id })); }
+  updateSettings(value: unknown, appearanceValue?: unknown): Promise<void> {
+    const settings = parseSettings(value); const appearance = appearanceValue === undefined ? undefined : parseAppearance(appearanceValue);
+    return this.mutate(data => ({ ...data, settings, ...(appearance === undefined ? {} : { appearance }) }));
   }
   updateSession(key: string, apply: (value: SessionPreference) => SessionPreference): Promise<void> {
     if (key.length > 1024) throw new ProtocolFault('protocol');
@@ -63,7 +84,8 @@ export class Preferences {
   setPetPaths(runtimeRoot: string | null, resourceRoot: string | null): Promise<void> {
     const runtime = parseLocalPath(runtimeRoot);
     const resource = parseLocalPath(resourceRoot);
-    return this.mutate(data => ({ ...data, petRuntimeRoot: runtime, petResourceRoot: resource }));
+    return this.mutate(data => ({ ...data, petRuntimeRoot: runtime, petResourceRoot: resource,
+      petSelectionId: resource === data.petResourceRoot ? data.petSelectionId : null }));
   }
   private mutate(apply: (data: PreferenceData) => PreferenceData): Promise<void> {
     const task = this.writing.then(async () => {

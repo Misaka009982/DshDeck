@@ -36,12 +36,17 @@ export class BasicAuthBroker {
       if (binding.attempted.has(key)) { this.credentials.evict(scope); callback(); return; }
       binding.attempted.add(key);
       const cached = this.credentials.get(scope);
-      if (cached !== undefined) { callback(cached.username, cached.password); return; }
-      void promptCredential(binding.parent, { origin: url.origin, realm: info.realm },
-        value => this.credentials.set(scope, value), assets, ipc).then(value => {
+      if (cached !== undefined) {
+        try { this.credentials.set(scope, cached); this.credentials.authorizeTarget(scope, request.url); callback(cached.username, cached.password); } catch { callback(); }
+        return;
+      }
+      const infoForStore = this.credentials.info(scope.authProfileId, scope.origin);
+      void promptCredential(binding.parent, { origin: url.origin, realm: info.realm, username: infoForStore.username ?? '',
+        rememberAvailable: infoForStore.rememberAvailable, remembered: infoForStore.remembered, usernameLocked: infoForStore.username !== null },
+        value => this.credentials.remember(scope, value, value.remember ?? false), assets, ipc).then(value => {
         if (value === undefined || contents === undefined || contents === null || contents.isDestroyed()
           || this.bindings.get(contents.id) !== binding) callback();
-        else callback(value.username, value.password);
+        else { try { this.credentials.authorizeTarget(scope, request.url); callback(value.username, value.password); } catch { callback(); } }
       }, () => callback());
     });
   }

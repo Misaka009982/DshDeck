@@ -16,6 +16,8 @@ import { MockAdapter } from '../protocol/mock-adapter.js';
 import { terminalFromEvent } from '../protocol/wire-values.js';
 import type { AdapterCallbacks, AdapterSubscription, WorkbenchAdapter } from '../protocol/adapter.js';
 import type { DiagnosticLogger } from '../logging/diagnostic-logger.js';
+import type { AppearanceView } from '../../shared/appearance.js';
+import type { SessionWebState } from '../../shared/session-web.js';
 
 interface Binding { readonly adapter: WorkbenchAdapter; readonly scope: ServerScope; readonly signal: AbortSignal }
 interface Foreground { readonly context: SessionContext; readonly controller: AbortController; subscription: AdapterSubscription | undefined }
@@ -58,6 +60,9 @@ export class WorkbenchService {
   private pet: PetPort | undefined;
   private notifications: NotificationPort | undefined;
   private windowState: () => { visible: boolean; focused: boolean } = () => ({ visible: false, focused: false });
+  private appearance: { view(): AppearanceView } | undefined;
+  private web: { status(): SessionWebState } | undefined;
+  private webOwner: { readonly scope: ServerScope; readonly sessionId: string | null } | null = null;
 
   constructor(private readonly auth: AuthService, readonly preferences: Preferences, private readonly logger?: DiagnosticLogger) {
     this.cache = new SessionCache(64 * 1024 * 1024, () => this.changed());
@@ -71,6 +76,30 @@ export class WorkbenchService {
   }
   async initialize(): Promise<void> { await this.preferences.load(); this.scheduler.setIntervalSeconds(this.preferences.settings().syncIntervalSeconds); this.scheduler.start(); this.changed(); }
   setWindowState(read: () => { visible: boolean; focused: boolean }): void { this.windowState = read; }
+  attachAppearance(port: { view(): AppearanceView }): void { this.appearance = port; this.changed(); }
+  appearanceView(): AppearanceView | undefined { return this.appearance?.view(); }
+  attachWeb(port: { status(): SessionWebState }): void { this.web = port; this.changed(); }
+  hasNativePending(serverId: string, sessionId: string | null): boolean { return this.pending.get(serverId)?.some(pending => sessionId === null || pending.sessionId === sessionId) ?? false; }
+  enterWeb(scope: ServerScope, sessionId: string | null): void {
+    if (this.hasNativePending(scope.serverId, sessionId)) throw new ProtocolFault('conflict');
+    const binding = this.bindings.get(scope.serverId);
+    if (binding !== undefined && !binding.signal.aborted && binding.scope.authProfileId === scope.authProfileId && binding.scope.generation === scope.generation) binding.adapter.setWebOwner?.({ sessionId });
+    this.webOwner = { scope: { ...scope }, sessionId };
+    if (this.foreground?.context.serverId === scope.serverId && (sessionId === null || this.foreground.context.sessionId === sessionId)) this.stopForeground();
+    this.changed();
+  }
+  leaveWeb(scope: ServerScope): void {
+    const owner = this.webOwner;
+    if (owner === null || owner.scope.serverId !== scope.serverId || owner.scope.authProfileId !== scope.authProfileId || owner.scope.generation !== scope.generation) return;
+    this.webOwner = null;
+    const binding = this.bindings.get(scope.serverId);
+    if (binding?.scope.authProfileId === scope.authProfileId && binding.scope.generation === scope.generation && !binding.signal.aborted) binding.adapter.setWebOwner?.(null);
+    if (this.disposed) return;
+    const context = this.focus.current();
+    if (context !== null && this.foreground === undefined) void this.startForeground(context).catch(error => this.bodyFailed(context, error));
+    this.changed();
+  }
+  clearSelection(): void { this.stopForeground(); this.focus.clear(); this.lastSelection = null; this.cache.protect(null); this.changed(); }
   attachPet(pet: PetPort): void { this.pet = pet; this.changed(); }
   attachNotifications(notifications: NotificationPort): void { this.notifications = notifications; this.changed(); }
   preferencesChanged(): void {
@@ -114,6 +143,7 @@ export class WorkbenchService {
       revision: this.revision, servers, tasks: this.tasks, counts: countTasks(this.tasks), selected,
       conversation: selected === null ? null : this.conversation(selected), settings: this.preferences.settings(),
       pet: this.pet?.status() ?? { state: 'disabled', ...this.preferences.petPaths(), message: '未启用本机宠物。' }, demo: this.demo,
+      ...(this.appearance === undefined ? {} : { appearance: this.appearance.view() }), ...(this.web === undefined ? {} : { web: this.web.status() }),
     };
   }
   async connect(serverId: string): Promise<import('../../shared/contracts.js').ServerSnapshot> {
@@ -134,7 +164,7 @@ export class WorkbenchService {
     this.reconciler.cancel(selected);
     this.updateTargets();
     // 不等待 HTTP/WS 再返回：命中缓存时先给 UI 本地正文，然后异步补齐。
-    void this.startForeground(selected).catch(error => this.bodyFailed(selected, error));
+    if (!this.currentIsWebOwned(selected)) void this.startForeground(selected).catch(error => this.bodyFailed(selected, error));
     this.changed();
     return this.requireSnapshot();
   }
@@ -165,6 +195,7 @@ export class WorkbenchService {
     this.changed();
   }
   async send(input: SendTextInput): Promise<void> {
+    if (this.currentIsWebOwned(input.context)) throw new ProtocolFault('conflict');
     this.assertSelected(input.context);
     const binding = this.binding(input.context);
     if (binding.adapter.source !== 'live') throw new ProtocolFault('unsupported');
@@ -194,6 +225,7 @@ export class WorkbenchService {
     await binding.adapter.stop(context.sessionId, binding.signal);
   }
   async answer(input: AnswerInput): Promise<void> {
+    if (this.currentIsWebOwned(input.context)) throw new ProtocolFault('conflict');
     this.assertSelected(input.context);
     const binding = this.binding(input.context);
     await binding.adapter.answer(input, binding.signal);
@@ -285,8 +317,13 @@ export class WorkbenchService {
       sessions: sessions => {
         if (!this.scopeCurrent(scope)) return;
         this.directory.replaceSessions(scope, sessions);
-        for (const session of sessions) this.state.upsert(scope, session);
-        for (const facts of this.state.all()) if (facts.serverId === scope.serverId && this.directory.session(scope.serverId, facts.sessionId) === undefined) this.state.revoke(scope, facts.sessionId);
+        for (const session of this.directory.sessions(scope.serverId)) {
+          this.state.upsert(scope, session); this.state.setArchived(scope, session.sessionId, this.directory.archived(scope.serverId, session.sessionId));
+        }
+        for (const facts of this.state.all()) if (facts.serverId === scope.serverId && this.directory.session(scope.serverId, facts.sessionId) === undefined) {
+          this.state.revoke(scope, facts.sessionId);
+          const context = { ...scope, workspaceId: null, sessionId: facts.sessionId }; this.reconciler.cancel(context); this.cache.remove(context);
+        }
         this.changed();
       },
       removed: sessionId => {
@@ -320,6 +357,7 @@ export class WorkbenchService {
     };
   }
   private async startForeground(context: SessionContext): Promise<void> {
+    if (this.currentIsWebOwned(context)) return;
     const binding = this.binding(context);
     const controller = new AbortController();
     const foreground: Foreground = { context, controller, subscription: undefined };
@@ -348,6 +386,7 @@ export class WorkbenchService {
     if (!this.scopeCurrent(context)) return;
     const cached = this.cache.get(context); if (cached === undefined) return;
     const facts = this.state.get(context.serverId, context.sessionId);
+    if (cached.title !== null) this.state.setTitle(context, context.sessionId, cached.title.text, cached.title.asOfSeq);
     const baseline = facts?.baselineCursor;
     this.state.primeCursor(context, context.sessionId, cached.cursor);
     const latestStart = [...cached.events].reverse().find(event => event.type === 'turn/start');
@@ -441,9 +480,20 @@ export class WorkbenchService {
     return current?.authProfileId === scope.authProfileId && current.generation === scope.generation;
   }
   private selection(): SessionContext | null {
+    const saved = this.lastSelection;
+    if (saved !== null && this.directory.ready(saved.serverId)
+      && this.directory.scope(saved.serverId)?.authProfileId === saved.authProfileId
+      && (this.directory.session(saved.serverId, saved.sessionId) === undefined || this.directory.archived(saved.serverId, saved.sessionId))) {
+      // 离线保留缓存；已确认删除或归档则撤销选择，不留可点击的旧人工输入。
+      this.stopForeground(); this.focus.clear(saved.serverId); this.lastSelection = null; this.cache.protect(null);
+    }
     const selected = this.focus.current();
     if (selected !== null) this.lastSelection = selected;
     return this.lastSelection === null ? null : { ...this.lastSelection };
+  }
+  private currentIsWebOwned(context: SessionContext): boolean {
+    const owner = this.webOwner;
+    return owner !== null && owner.scope.serverId === context.serverId && owner.scope.authProfileId === context.authProfileId && owner.scope.generation === context.generation && (owner.sessionId === null || owner.sessionId === context.sessionId);
   }
   private assertSelected(context: SessionContext): void {
     this.focus.validate(context);
@@ -456,7 +506,7 @@ export class WorkbenchService {
     const facts = this.state.get(serverId, sessionId);
     const preference = this.preferences.session(preferenceKey(serverId, authProfileId, sessionId));
     const task = this.tasks.find(task => task.serverId === serverId && task.sessionId === sessionId);
-    return { ...summary, title: facts?.title ?? summary.title ?? sessionId,
+    return { ...summary, title: facts?.title ?? summary.title ?? (summary.blank ? '新会话' : '未命名会话'),
       followed: preference.followed, unread: preference.manualUnread || (facts?.baselineCursor !== null && (facts?.cursor ?? -1) > preference.readSeq),
       archived: this.directory.archived(serverId, sessionId), running: facts?.running ?? summary.running,
       pendingCount: facts?.pendingIds.length ?? 0, task: task?.color ?? null, freshness: facts?.freshness ?? 'stale' };
@@ -473,7 +523,7 @@ export class WorkbenchService {
     const ledgers = [...this.sends.entries()].filter(([key]) => JSON.parse(key)[0] === this.pref(context));
     const last = ledgers[ledgers.length - 1]?.[1];
     return {
-      context, title: this.state.get(context.serverId, context.sessionId)?.title ?? context.sessionId,
+      context, title: this.row(context.serverId, context.authProfileId, context.sessionId)?.title ?? context.sessionId,
       status: cached === undefined ? failure === null ? 'loading' : 'error' : cached.hasGap ? 'gap' : !connected || cached.freshness === 'stale' ? 'stale' : this.foreground !== undefined && sameSession(this.foreground.context, context) ? 'live' : 'cached',
       events: cached?.events ?? [], assistant: cached?.assistant ?? { revision: 0, activeAttempt: null }, cursor: cached?.cursor ?? -1,
       hasMore: cached?.hasMore ?? false, hasGap: cached?.hasGap ?? false, syncedAt: cached?.syncedAt ?? null,
@@ -486,7 +536,8 @@ export class WorkbenchService {
       const context = this.directory.resolve(facts.serverId, facts.sessionId);
       return context === undefined || !facts.accessible || this.suspendedDetails.has(facts.serverId) ? [] : [{ context, running: facts.running, pending: facts.pendingIds.length > 0 }];
     });
-    this.scheduler.update(targets, this.selection());
+    const selected = this.selection();
+    this.scheduler.update(targets, selected !== null && this.currentIsWebOwned(selected) ? null : selected);
   }
   private changed(): void {
     if (this.disposed) return;

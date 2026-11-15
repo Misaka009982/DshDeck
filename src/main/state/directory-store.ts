@@ -59,12 +59,7 @@ export class DirectoryStore {
     switch (frame.type) {
       case 'baseline':
       case 'replace': {
-        if (frame.type === 'replace') {
-          const allowed = new Set(frame.value.items.flatMap(workspace => workspace.sessionIds));
-          for (const old of server.workspaces.values()) {
-            for (const id of old.sessionIds) if (!allowed.has(id)) this.removeSession(scope, id);
-          }
-        }
+        // 工作区基线只声明归属；移出或删除工作区不等于删除会话。
         server.workspaces.clear();
         for (const workspace of frame.value.items) server.workspaces.set(workspace.workspaceId, cloneWorkspace(workspace));
         server.order = frame.value.items.map(workspace => workspace.workspaceId);
@@ -112,7 +107,7 @@ export class DirectoryStore {
 
   resolve(serverId: string, sessionId: string): SessionContext | undefined {
     const server = this.servers.get(serverId);
-    if (server === undefined || !this.ready(serverId) || !server.sessions.has(sessionId) || server.tombstones.has(sessionId)) return undefined;
+    if (server === undefined || !this.ready(serverId) || !server.sessions.has(sessionId) || server.tombstones.has(sessionId) || server.archived.has(sessionId)) return undefined;
     const workspace = this.workspaces(serverId).find(workspace => workspace.sessionIds.includes(sessionId));
     return { ...server.scope, sessionId, workspaceId: workspace?.workspaceId ?? null };
   }
@@ -120,7 +115,7 @@ export class DirectoryStore {
   validate(context: SessionContext): SessionContext {
     const server = this.match(context);
     if (server === undefined || !this.ready(context.serverId) || !server.sessions.has(context.sessionId)
-      || server.tombstones.has(context.sessionId)) throw new ProtocolFault('forbidden');
+      || server.tombstones.has(context.sessionId) || server.archived.has(context.sessionId)) throw new ProtocolFault('forbidden');
     if (context.workspaceId === null) {
       if (this.workspaces(context.serverId).some(workspace => workspace.sessionIds.includes(context.sessionId))) throw new ProtocolFault('forbidden');
     } else if (!server.workspaces.get(context.workspaceId)?.sessionIds.includes(context.sessionId)) throw new ProtocolFault('forbidden');

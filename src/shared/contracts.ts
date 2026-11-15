@@ -1,9 +1,13 @@
 import type { PublicFailure } from './faults.js';
 import type { AnswerInput, ReadConfirmation, SendTextInput, SessionContext, WorkbenchSettings, WorkbenchSnapshot } from './domain.js';
+import type { AppearancePatch, AppearanceSettings } from './appearance.js';
+import type { WebViewport } from './session-web.js';
+import type { WorkbenchCommand } from './workbench-commands.js';
 
 export interface ServerInput {
   readonly alias: string;
   readonly baseUrl: string;
+  readonly proxyMode?: 'system' | 'direct';
 }
 
 /** 只有非敏感配置；登录态留在该 profile 的 Chromium 分区。 */
@@ -29,6 +33,13 @@ export interface SessionBrief {
   readonly agentAvailable: boolean;
   readonly blank: boolean;
   readonly updatedAt: number;
+  readonly title?: string;
+  /** cached 水位不能与当前连接的 sequenced 水位直接比较。 */
+  readonly titleHint?: { readonly kind: 'cached' | 'sequenced'; readonly asOfSeq: number };
+  readonly parentSessionId?: string;
+  readonly origin?: 'subagent';
+  readonly cwd?: string;
+  readonly formatStatus?: 'current' | 'migration-required';
 }
 
 export interface ProbeSampleInput {
@@ -99,10 +110,26 @@ export interface AppBridge {
   syncNow(context: SessionContext): Promise<IpcResult<void>>;
   loadOlder(context: SessionContext): Promise<IpcResult<void>>;
   confirmRead(input: ReadConfirmation): Promise<IpcResult<void>>;
-  updateSettings(settings: WorkbenchSettings): Promise<IpcResult<void>>;
+  updateSettings(settings: WorkbenchSettings, appearance?: AppearanceSettings): Promise<IpcResult<void>>;
   openFallback(serverId: string): Promise<IpcResult<void>>;
+  openWholeServer(serverId: string): Promise<IpcResult<void>>;
   closeFallback(): Promise<IpcResult<void>>;
   choosePetPath(kind: 'runtime' | 'resources'): Promise<IpcResult<void>>;
+  selectPet(id: string): Promise<IpcResult<void>>;
+  rescanPets(): Promise<IpcResult<void>>;
+  basicCredentialInfo(id: string): Promise<IpcResult<BasicCredentialInfo>>;
+  editBasicCredentials(id: string): Promise<IpcResult<void>>;
+  forgetBasicCredentials(id: string): Promise<IpcResult<void>>;
+  updateAppearance(input: AppearancePatch): Promise<IpcResult<void>>;
+  chooseBackground(): Promise<IpcResult<void>>;
+  clearBackground(): Promise<IpcResult<void>>;
+  setWebViewport(input: WebViewport): Promise<IpcResult<void>>;
+  cacheWebLayout(): Promise<IpcResult<{ name: string }>>;
+  openCommandMenu(): Promise<IpcResult<WorkbenchCommand>>;
+  toggleWebSidebar(): Promise<IpcResult<void>>;
+  showWebFiles(): Promise<IpcResult<boolean>>;
+  showWebConversation(): Promise<IpcResult<boolean>>;
+  openWebLayouts(): Promise<IpcResult<void>>;
   setDemo(enabled: boolean): Promise<IpcResult<void>>;
   openLogs(): Promise<IpcResult<void>>;
   copyDiagnostics(): Promise<IpcResult<void>>;
@@ -123,14 +150,22 @@ export interface AuthBridge {
   cancel(): Promise<IpcResult<void>>;
 }
 
+export interface BasicCredentialInfo {
+  readonly rememberAvailable: boolean;
+  readonly remembered: boolean;
+  readonly username: string | null;
+  readonly rejected: boolean;
+  readonly storageFailed: boolean;
+}
 export interface CredentialInput {
   readonly username: string;
   readonly password: string;
+  readonly remember?: boolean;
 }
 
 /** 密码只在独立本地认证提示窗输入并传给 main，不经过工作台 UI。 */
 export interface CredentialBridge {
-  describe(): Promise<IpcResult<{ origin: string; realm: string }>>;
+  describe(): Promise<IpcResult<{ origin: string; realm: string; username?: string; rememberAvailable?: boolean; remembered?: boolean; saveOnly?: boolean; usernameLocked?: boolean }>>;
   submit(input: CredentialInput): Promise<IpcResult<void>>;
   cancel(): Promise<IpcResult<void>>;
 }

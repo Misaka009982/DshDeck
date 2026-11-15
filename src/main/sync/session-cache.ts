@@ -2,10 +2,13 @@ import type { AssistantBaseline, AssistantFrame, FollowSnapshot, Freshness, Hist
 import { preferenceKey } from '../../shared/domain.js';
 import { ProtocolFault, toPublicFailure } from '../../shared/faults.js';
 import type { PublicFailure } from '../../shared/faults.js';
+import { parseSessionTitle } from '../../shared/session-title.js';
 
+interface CachedTitle { readonly text: string; readonly asOfSeq: number }
 export interface CacheSnapshot {
   readonly context: SessionContext;
   readonly header: FollowSnapshot['header'];
+  readonly title: CachedTitle | null;
   readonly events: readonly WireEvent[];
   readonly assistant: AssistantBaseline;
   readonly cursor: number;
@@ -19,6 +22,7 @@ export interface CacheSnapshot {
 interface Entry {
   context: SessionContext;
   header: FollowSnapshot['header'];
+  title: CachedTitle | null;
   events: readonly WireEvent[];
   assistant: AssistantBaseline;
   cursor: number;
@@ -45,7 +49,7 @@ export class SessionCache {
     if (entry === undefined) return undefined;
     this.entries.delete(key(context)); this.entries.set(key(context), entry);
     return {
-      context: { ...context }, header: { ...entry.header }, events: entry.events, assistant: entry.assistant,
+      context: { ...context }, header: { ...entry.header }, title: entry.title === null ? null : { ...entry.title }, events: entry.events, assistant: entry.assistant,
       cursor: entry.cursor, hasMore: entry.hasMore, hasGap: entry.hasGap, freshness: entry.freshness,
       syncing: entry.syncing, syncedAt: entry.syncedAt, failure: entry.failure,
     };
@@ -60,8 +64,10 @@ export class SessionCache {
     const cursor = Math.max(reusable ? previous.cursor : -1, snapshot.cursor);
     const assistant = reusable && (snapshot.cursor < previous.cursor || snapshot.assistant.revision < previous.assistant.revision) ? previous.assistant : snapshot.assistant;
     const first = events[0]?.seq ?? -1;
+    const text = parseSessionTitle(snapshot.projections.title);
+    const title = newerTitle(newerTitle(reusable ? previous.title : null, text === undefined ? null : { text, asOfSeq: snapshot.cursor }), titleFromEvents(events));
     const entry: Entry = {
-      context: { ...context }, header: { ...snapshot.header }, events, cursor, assistant,
+      context: { ...context }, header: { ...snapshot.header }, title, events, cursor, assistant,
       hasMore: first > 0 || (snapshot.hasMore && (!reusable || previous.hasMore)), hasGap: hasGap(events, cursor),
       freshness: 'fresh', syncing: previous?.syncing ?? false, syncedAt: this.now(), failure: null,
       settlementSeq: reusable ? previous.settlementSeq : null, bytes: 0,
@@ -72,7 +78,7 @@ export class SessionCache {
     const previous = this.require(context);
     if (page.cursor > previous.cursor) throw new ProtocolFault('protocol');
     const events = merge(previous.events, page.events);
-    const entry = { ...previous, events, hasMore: (events[0]?.seq ?? -1) > 0 && page.hasMore,
+    const entry = { ...previous, events, title: newerTitle(previous.title, titleFromEvents(page.events)), hasMore: (events[0]?.seq ?? -1) > 0 && page.hasMore,
       hasGap: hasGap(events, previous.cursor), freshness: 'fresh' as const, syncedAt: this.now(), failure: null };
     entry.hasMore = (events[0]?.seq ?? -1) > 0;
     this.admit(context, entry);
@@ -82,7 +88,7 @@ export class SessionCache {
     const events = merge(previous.events, [event]);
     const cursor = Math.max(previous.cursor, event.seq);
     const settled = previous.settlementSeq === event.seq && (event.type === 'assistant/message' || event.type === 'assistant/attempt');
-    const entry = { ...previous, events, cursor, hasGap: hasGap(events, cursor), freshness: 'fresh' as const,
+    const entry = { ...previous, events, cursor, title: newerTitle(previous.title, titleFromEvents([event])), hasGap: hasGap(events, cursor), freshness: 'fresh' as const,
       syncedAt: this.now(), failure: null,
       assistant: settled ? { revision: previous.assistant.revision, activeAttempt: null } : previous.assistant,
       settlementSeq: settled ? null : previous.settlementSeq };
@@ -150,7 +156,7 @@ export class SessionCache {
   }
   private require(context: SessionContext): Entry { const entry = this.match(context); if (entry === undefined) throw new ProtocolFault('protocol'); return entry; }
   private admit(context: SessionContext, entry: Entry): void {
-    entry.bytes = Buffer.byteLength(JSON.stringify({ events: entry.events, assistant: entry.assistant }), 'utf8');
+    entry.bytes = Buffer.byteLength(JSON.stringify({ events: entry.events, assistant: entry.assistant, title: entry.title }), 'utf8');
     // 过大的正文或 attempt 保留旧缓存并报告，不无限扩大当前会话预算。
     if (entry.bytes > Math.min(this.budget, 8 * 1024 * 1024)) throw new ProtocolFault('budget');
     this.entries.delete(key(context)); this.entries.set(key(context), entry);
@@ -175,6 +181,19 @@ function merge(previous: readonly WireEvent[], incoming: readonly WireEvent[]): 
     events.set(event.seq, event);
   }
   return [...events.values()].sort((left, right) => left.seq - right.seq);
+}
+function newerTitle(previous: CachedTitle | null, incoming: CachedTitle | null): CachedTitle | null {
+  return incoming !== null && (previous === null || incoming.asOfSeq >= previous.asOfSeq) ? incoming : previous;
+}
+function titleFromEvents(events: readonly WireEvent[]): CachedTitle | null {
+  for (let index = events.length - 1; index >= 0; index--) {
+    const event = events[index];
+    if (event?.type !== 'session/title') continue;
+    if (typeof event.data !== 'object' || event.data === null || Array.isArray(event.data)) throw new ProtocolFault('protocol');
+    const text = parseSessionTitle(Reflect.get(event.data, 'title'));
+    if (text !== undefined) return { text, asOfSeq: event.seq };
+  }
+  return null;
 }
 function hasGap(events: readonly WireEvent[], cursor: number): boolean {
   if (cursor >= 0 && (events.length === 0 || events[events.length - 1]?.seq !== cursor)) return true;

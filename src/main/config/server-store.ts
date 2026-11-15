@@ -25,11 +25,12 @@ export class ServerStore {
     if (!Array.isArray(value) || value.length > 64) throw new ProtocolFault('protocol');
     const configs = value.map(item => {
       const record = requireRecord(item);
-      requireKeys(record, ['id', 'alias', 'baseUrl', 'authProfileId']);
+      requireKeys(record, ['id', 'alias', 'baseUrl', 'authProfileId'], ['proxyMode']);
       const id = requireId(record.id);
       const authProfileId = requireId(record.authProfileId);
       createPartitionName(authProfileId);
-      return { ...normalizeServerInput({ alias: record.alias, baseUrl: record.baseUrl }), id, authProfileId };
+      return { ...normalizeServerInput({ alias: record.alias, baseUrl: record.baseUrl,
+        ...(record.proxyMode === undefined ? {} : { proxyMode: record.proxyMode }) }), id, authProfileId };
     });
     if (new Set(configs.map(config => config.id)).size !== configs.length
       || new Set(configs.map(config => config.authProfileId)).size !== configs.length) throw new ProtocolFault('protocol');

@@ -42,6 +42,7 @@ export class FallbackView {
         if (this.current === current) { this.current = undefined; this.resume(config.id); }
       });
     });
+    await session.ready();
     await view.webContents.loadURL(config.baseUrl).catch(() => {});
   }
   async close(): Promise<void> {

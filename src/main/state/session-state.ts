@@ -6,11 +6,12 @@ import type { DirectorySession } from './directory-store.js';
 export class SessionStateStore {
   private readonly scopes = new Map<string, ServerScope>();
   private readonly facts = new Map<string, SessionFacts>();
+  private readonly titleCuts = new Map<string, number>();
 
   beginScope(scope: ServerScope): void {
     const previous = this.scopes.get(scope.serverId);
     if (previous?.authProfileId === scope.authProfileId && previous.generation >= scope.generation) return;
-    for (const [key, value] of this.facts) if (value.serverId === scope.serverId) this.facts.delete(key);
+    for (const [key, value] of this.facts) if (value.serverId === scope.serverId) { this.facts.delete(key); this.titleCuts.delete(key); }
     this.scopes.set(scope.serverId, { ...scope });
   }
   upsert(scope: ServerScope, summary: DirectorySession): void {
@@ -18,8 +19,14 @@ export class SessionStateStore {
     const key = sessionKey(scope.serverId, summary.sessionId);
     const previous = this.facts.get(key);
     const running = previous?.stateObserved ? previous.running : summary.running;
+    const cut = this.titleCuts.get(key);
+    let title = previous?.title ?? summary.title ?? (summary.blank ? '新会话' : '未命名会话');
+    if (summary.title !== undefined && (cut === undefined || summary.titleHint?.kind === 'sequenced' && summary.titleHint.asOfSeq >= cut)) {
+      title = summary.title;
+      if (summary.titleHint?.kind === 'sequenced') this.titleCuts.set(key, summary.titleHint.asOfSeq);
+    }
     this.facts.set(key, {
-      ...scope, sessionId: summary.sessionId, title: summary.title ?? previous?.title ?? summary.sessionId,
+      ...scope, sessionId: summary.sessionId, title,
       running, agentAvailable: previous?.stateObserved ? previous.agentAvailable : summary.agentAvailable,
       freshness: 'fresh', accessible: previous?.accessible ?? true, archived: previous?.archived ?? false,
       cursor: previous?.cursor ?? -1, baselineCursor: previous?.baselineCursor ?? null,
@@ -48,7 +55,12 @@ export class SessionStateStore {
   setPending(scope: ServerScope, sessionId: string, pendingIds: readonly string[]): void {
     this.update(scope, sessionId, facts => ({ ...facts, pendingIds: [...new Set([...facts.pendingIds.filter(id => id.startsWith('state:')), ...pendingIds])] }));
   }
-  setTitle(scope: ServerScope, sessionId: string, title: string): void { this.update(scope, sessionId, facts => ({ ...facts, title })); }
+  setTitle(scope: ServerScope, sessionId: string, title: string, asOfSeq?: number): void {
+    const key = sessionKey(scope.serverId, sessionId);
+    if (!this.matches(scope) || asOfSeq !== undefined && asOfSeq < (this.titleCuts.get(key) ?? -1)) return;
+    this.update(scope, sessionId, facts => ({ ...facts, title }));
+    if (asOfSeq !== undefined && this.facts.has(key)) this.titleCuts.set(key, asOfSeq);
+  }
   terminal(scope: ServerScope, sessionId: string, result: TerminalEvidence, live: boolean): void {
     this.update(scope, sessionId, facts => {
       if (result.seq < (facts.terminal?.seq ?? -1)) return facts;
@@ -62,7 +74,7 @@ export class SessionStateStore {
   setArchived(scope: ServerScope, sessionId: string, archived: boolean): void { this.update(scope, sessionId, facts => ({ ...facts, archived })); }
   revoke(scope: ServerScope, sessionId: string): void { this.update(scope, sessionId, facts => ({ ...facts, accessible: false, pendingIds: [], freshness: 'stale' })); }
   markStale(serverId: string): void { for (const [key, facts] of this.facts) if (facts.serverId === serverId) this.facts.set(key, { ...facts, freshness: 'stale' }); }
-  clear(serverId: string): void { this.scopes.delete(serverId); for (const [key, facts] of this.facts) if (facts.serverId === serverId) this.facts.delete(key); }
+  clear(serverId: string): void { this.scopes.delete(serverId); for (const [key, facts] of this.facts) if (facts.serverId === serverId) { this.facts.delete(key); this.titleCuts.delete(key); } }
   get(serverId: string, sessionId: string): SessionFacts | undefined { const facts = this.facts.get(sessionKey(serverId, sessionId)); return facts === undefined ? undefined : cloneFacts(facts); }
   all(): readonly SessionFacts[] { return [...this.facts.values()].map(cloneFacts); }
 

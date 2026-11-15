@@ -8,8 +8,10 @@ import { ProtocolFault, requireKeys, requireRecord } from '../../shared/faults.j
 import { PET_MAX_LINE_BYTES, parsePetAction, parsePetEnvelope } from '../../shared/pet-protocol.js';
 import { Preferences } from '../storage/preferences.js';
 import { petSettings, petSnapshot } from './pet-snapshot.js';
-import { validatePetAsset, validatePetRuntime } from './pet-assets.js';
+import { validatePetRuntime } from './pet-assets.js';
 import type { PetAsset } from './pet-assets.js';
+import { readPetChoice, scanPetLibrary } from './pet-library.js';
+import type { PetLibrary } from './pet-library.js';
 
 interface PetHooks { readonly changed: () => void; readonly jump: (task: TaskProjection) => void; readonly clear: (task: TaskProjection) => Promise<void>; readonly openSettings: () => void }
 
@@ -24,6 +26,10 @@ export class PetCompanion {
   private taskFingerprint = '';
   private child: ChildProcessWithoutNullStreams | undefined;
   private asset: PetAsset | undefined;
+  private library: PetLibrary | undefined;
+  private scanning: Promise<void> | undefined;
+  private selectionQueue: Promise<void> = Promise.resolve();
+  private retiring: Promise<void> = Promise.resolve();
   private notification: unknown = null;
   private state: PetStatus['state'] = 'disabled';
   private message = '未启用本机宠物。';
@@ -31,23 +37,62 @@ export class PetCompanion {
   private readonly actions = new Set<string>();
   private disposed = false;
   constructor(private readonly preferences: Preferences, private readonly hooks: PetHooks) {}
-  status(): PetStatus { return { state: this.state, ...this.preferences.petPaths(), message: this.message }; }
+  status(): PetStatus { return { state: this.state, ...this.preferences.petPaths(), message: this.message,
+    choices: this.library?.entries.map(({ id, name, available, message }) => ({ id, name, available, message })) ?? [],
+    selectedPetId: this.selected()?.id ?? null, scanning: this.scanning !== undefined, truncated: this.library?.truncated ?? false }; }
   async choosePath(kind: 'runtime' | 'resources', parent: BrowserWindow): Promise<void> {
-    const result = await dialog.showOpenDialog(parent, { title: kind === 'runtime' ? '选择现有 pet-e 项目目录' : '选择已授权 WebP 宠物资源目录', properties: ['openDirectory'] });
-    const path = result.filePaths[0]; if (result.canceled || path === undefined) return;
-    if (kind === 'runtime') await validatePetRuntime(path); else await validatePetAsset(path);
+    const result = await dialog.showOpenDialog(parent, { title: kind === 'runtime' ? '选择现有宠物运行器目录' : '选择宠物库根目录（也兼容单个宠物包）', properties: ['openDirectory'] });
+    const path = result.filePaths[0]; if (result.canceled || path === undefined || this.disposed) return;
+    if (kind === 'runtime') await validatePetRuntime(path);
+    const library = kind === 'resources' ? await scanPetLibrary(path) : undefined;
     const paths = this.preferences.petPaths();
-    this.stop();
     await this.preferences.setPetPaths(kind === 'runtime' ? path : paths.runtimeRoot, kind === 'resources' ? path : paths.resourceRoot);
+    if (library !== undefined) this.library = library;
+    if (kind === 'runtime') this.stop();
+    await this.applySelection();
     if (this.preferences.settings().petEnabled) await this.setEnabled(true);
     this.hooks.changed();
+  }
+  rescan(): Promise<void> {
+    if (this.scanning !== undefined) return this.scanning;
+    const path = this.preferences.petPaths().resourceRoot;
+    const work = (async () => {
+      if (path === null) { this.library = undefined; return; }
+      try {
+        const library = await scanPetLibrary(path);
+        if (this.disposed || this.preferences.petPaths().resourceRoot !== path) return;
+        this.library = library; await this.applySelection();
+      } catch {
+        if (this.preferences.petPaths().resourceRoot === path) { this.library = undefined; this.stop(); this.state = 'unavailable'; this.message = '无法读取宠物库，请重新选择目录。'; }
+      }
+    })();
+    this.scanning = work; this.hooks.changed();
+    return work.finally(() => { if (this.scanning === work) { this.scanning = undefined; this.hooks.changed(); } });
+  }
+  selectPet(id: string): Promise<void> {
+    const work = this.selectionQueue.then(async () => {
+      const library = this.library;
+      if (library === undefined || this.disposed) throw new ProtocolFault('not-found');
+      const asset = await readPetChoice(library, id);
+      if (this.library !== library || this.disposed) throw new ProtocolFault('cancelled');
+      await this.preferences.setPetSelection(id); this.asset = asset;
+      if (this.child !== undefined) { this.sendConfig(); if (this.state === 'running') this.sendSnapshot(); }
+      else if (this.preferences.settings().petEnabled) await this.setEnabled(true);
+      this.hooks.changed();
+    });
+    this.selectionQueue = work.catch(() => {}); return work;
   }
   setEnabled(enabled: boolean): Promise<void> {
     if (!enabled) { this.stop(); this.state = 'disabled'; this.message = '宠物已禁用，远程任务与关注标记未改变。'; this.hooks.changed(); return Promise.resolve(); }
     if (this.child !== undefined || this.enabling !== undefined || this.disposed) return this.enabling ?? Promise.resolve();
-    const work = this.start().catch(() => { this.state = 'unavailable'; this.message = '本机 pet-e 或 WebP 资源不可用；不会下载或降低校验。'; this.hooks.changed(); });
+    const requested = this.selectionFingerprint();
+    const work = this.start().catch(() => { this.state = 'unavailable'; this.message = '本机宠物运行器或 WebP 资源不可用；不会下载或降低校验。'; this.hooks.changed(); });
     this.enabling = work;
-    return work.finally(() => { if (this.enabling === work) this.enabling = undefined; });
+    return work.finally(() => {
+      if (this.enabling !== work) return;
+      this.enabling = undefined;
+      if (!this.disposed && this.preferences.settings().petEnabled && this.child === undefined && requested !== this.selectionFingerprint()) void this.setEnabled(true);
+    });
   }
   publish(tasks: readonly TaskProjection[]): void {
     const fingerprint = JSON.stringify(tasks.map(task => [task.id, task.color, task.freshness, task.generation, task.resultId, task.title]));
@@ -59,12 +104,37 @@ export class PetCompanion {
   notify(notification: unknown): void { this.notification = notification; if (this.child !== undefined && this.state === 'running') this.sendSnapshot(); }
   dispose(): void { this.disposed = true; this.stop(); }
 
+  private selected() {
+    const id = this.preferences.petSelection();
+    return id === null ? this.library?.entries.find(entry => entry.available) : this.library?.entries.find(entry => entry.id === id && entry.available);
+  }
+  private selectionFingerprint(): string { return JSON.stringify([this.preferences.petPaths(), this.preferences.petSelection()]); }
+  private async applySelection(): Promise<void> {
+    const selected = this.selected();
+    if (selected === undefined || this.library === undefined) {
+      this.asset = undefined; this.stop();
+      this.message = '宠物库中没有可用的当前选择；请选择可用 WebP 精灵包。';
+      if (this.preferences.settings().petEnabled) this.state = 'unavailable';
+      return;
+    }
+    this.asset = await readPetChoice(this.library, selected.id);
+    if (this.child !== undefined) this.sendConfig();
+    else this.message = `已扫描 ${this.library.entries.length} 只宠物，桌面只展示当前选择。${this.library.truncated ? '扫描达到安全上限，未把结果当作完整库。' : ''}`;
+  }
+  private sendConfig(): void {
+    this.send('config', { language: 'zh-CN', visible: true, settings: { ...petSettings(true), petId: this.asset?.id ?? null }, pet: this.asset ?? null, labels: { source: 'dsh', idle: '没有关注任务' } });
+  }
   private async start(): Promise<void> {
+    await this.retiring;
     const paths = this.preferences.petPaths();
     if (paths.runtimeRoot === null || paths.resourceRoot === null) throw new ProtocolFault('not-found');
-    this.state = 'starting'; this.message = '正在校验本机 companion 与资源。'; this.hooks.changed();
-    const [runtime, asset] = await Promise.all([validatePetRuntime(paths.runtimeRoot), validatePetAsset(paths.resourceRoot)]);
-    if (this.disposed || !this.preferences.settings().petEnabled) return;
+    if (this.library?.sourceRoot !== paths.resourceRoot) await this.rescan();
+    const selected = this.selected(); const library = this.library;
+    if (selected === undefined || library === undefined) throw new ProtocolFault('not-found');
+    const requested = this.selectionFingerprint();
+    this.state = 'starting'; this.message = '正在校验本机宠物运行器与资源。'; this.hooks.changed();
+    const [runtime, asset] = await Promise.all([validatePetRuntime(paths.runtimeRoot), readPetChoice(library, selected.id)]);
+    if (this.disposed || !this.preferences.settings().petEnabled || requested !== this.selectionFingerprint()) return;
     this.generation++; this.hostRevision = 0; this.childRevision = 0; this.snapshotRevision = 0; this.actions.clear(); this.asset = asset;
     // 子进程不继承可能含模型密钥的整个环境；只保留 Chromium/Windows 所需位置。
     const env: NodeJS.ProcessEnv = {};
@@ -95,7 +165,7 @@ export class PetCompanion {
     if (envelope.type === 'hello') {
       const payload = requireRecord(envelope.payload); requireKeys(payload, ['runtimeVersion', 'appVersion']);
       if (typeof payload.runtimeVersion !== 'string' || typeof payload.appVersion !== 'string') throw new ProtocolFault('protocol');
-      this.send('config', { language: 'zh-CN', visible: true, settings: { ...petSettings(true), petId: this.asset?.id ?? null }, pet: this.asset ?? null, labels: { source: 'dsh', idle: '没有关注任务' } });
+      this.sendConfig();
     } else if (envelope.type === 'ready') {
       const payload = requireRecord(envelope.payload); requireKeys(payload, ['rendererReady']);
       if (payload.rendererReady !== true) throw new ProtocolFault('protocol');
@@ -133,6 +203,8 @@ export class PetCompanion {
   private stop(): void {
     const child = this.child; if (child === undefined) return;
     this.child = undefined;
+    const ended = child.exitCode !== null || child.signalCode !== null ? Promise.resolve() : new Promise<void>(resolve => { child.once('close', () => resolve()); });
+    this.retiring = Promise.all([this.retiring, ended]).then(() => {});
     const line = `${JSON.stringify({ protocolVersion: 1, instanceId: this.instanceId, generation: this.generation, revision: ++this.hostRevision,
       type: 'shutdown', payload: { reason: 'DshDeck 已结束宠物展示，不影响远程任务。' } })}\n`;
     // 结束协议和 stdin，等待子端自然退出；不 kill，不递归经过失败的发送队列。

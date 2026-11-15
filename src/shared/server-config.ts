@@ -3,7 +3,8 @@ import type { ServerInput } from './contracts.js';
 
 export function normalizeServerInput(input: unknown): ServerInput {
   const record = requireRecord(input);
-  requireKeys(record, ['alias', 'baseUrl']);
+  requireKeys(record, ['alias', 'baseUrl'], ['proxyMode']);
+  if (record.proxyMode !== undefined && record.proxyMode !== 'system' && record.proxyMode !== 'direct') throw new ProtocolFault('protocol');
   if (typeof record.alias !== 'string' || typeof record.baseUrl !== 'string') throw new ProtocolFault('protocol');
   const alias = record.alias.trim();
   const rawUrl = record.baseUrl.trim();
@@ -17,7 +18,7 @@ export function normalizeServerInput(input: unknown): ServerInput {
     || url.search !== '' || url.hash !== '' || url.hostname === '') throw new ProtocolFault('protocol');
   if (!url.pathname.endsWith('/')) url.pathname += '/';
   if (url.href.length > 2048) throw new ProtocolFault('protocol');
-  return { alias, baseUrl: url.href };
+  return { alias, baseUrl: url.href, ...(record.proxyMode === undefined ? {} : { proxyMode: record.proxyMode }) };
 }
 
 export function createPartitionName(authProfileId: string): string {

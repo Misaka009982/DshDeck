@@ -65,17 +65,17 @@ export class AuthService {
   }
 
   async edit(id: string, input: ServerInput): Promise<ServerSnapshot> {
-    const runtime = this.get(id);
+    this.get(id);
     const normalized = normalizeServerInput(input);
-    const changedScope = normalized.baseUrl !== runtime.config.baseUrl;
-    if (changedScope) this.invalidate(runtime);
+    // 先保存配置，磁盘失败时不撤销仍有效的旧载体；成功后再迁移权限代次。
     const config = await this.store.edit(id, normalized);
     const current = this.get(id);
-    if (config.authProfileId !== current.config.authProfileId) {
+    const changedNetwork = (config.proxyMode ?? 'system') !== (current.config.proxyMode ?? 'system');
+    if (config.authProfileId !== current.config.authProfileId || changedNetwork) {
       this.invalidate(current);
       const replacement = this.runtime(config);
       replacement.generation = current.generation;
-      current.session.clearVolatileCredentials();
+      if (config.authProfileId !== current.config.authProfileId) current.session.clearVolatileCredentials();
       this.runtimes.set(id, replacement);
       this.changed();
       return this.snapshot(replacement);

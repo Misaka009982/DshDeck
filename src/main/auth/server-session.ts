@@ -8,6 +8,8 @@ import type { ServerConfig } from '../../shared/contracts.js';
 import { assertReadRequest } from '../protocol/read-policy.js';
 import { MAX_RESPONSE_BYTES } from '../protocol/http-response.js';
 import { CredentialStore } from './credential-store.js';
+import { basicChallengeScope } from './basic-challenge.js';
+import { SocketHandshakeFault, waitForWebSocket } from './ws-handshake.js';
 import { ReadRequestGate } from './read-request-gate.js';
 import { isCertificateFailure, tlsOptions } from './tls-policy.js';
 import type { PocTransport } from '../../../tools/poc/protocol-probe.js';
@@ -22,12 +24,17 @@ export class ServerSession {
   readonly browserSession: Session;
   private readonly gate: ReadRequestGate;
   private readonly baseUrl: URL;
+  private readonly networkReady: Promise<void>;
   private readonly compatibilityContents = new Set<number>();
 
   constructor(readonly config: ServerConfig, private readonly credentials: CredentialStore, private readonly diagnostics?: DiagnosticLogger) {
     this.partition = createPartitionName(config.authProfileId);
     this.browserSession = session.fromPartition(this.partition);
     this.baseUrl = new URL(config.baseUrl);
+    this.networkReady = this.browserSession.setProxy({ mode: config.proxyMode === 'direct' ? 'direct' : 'system' })
+      .then(() => this.browserSession.closeAllConnections());
+    // 配置异步失败由实际请求报告，不成为未处理的 Promise 拒绝。
+    void this.networkReady.catch(() => {});
     this.gate = new ReadRequestGate(config.baseUrl);
     this.browserSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
     this.browserSession.setPermissionCheckHandler(() => false);
@@ -49,6 +56,8 @@ export class ServerSession {
       callback({ cancel: !compatible && !this.gate.allows(details.url, details.method, body) });
     });
   }
+
+  ready(signal?: AbortSignal): Promise<void> { return signal === undefined ? this.networkReady : waitForSignal(this.networkReady, signal); }
 
   transport(lifetime: AbortSignal): PocTransport { return this.createTransport(lifetime, false); }
 
@@ -78,16 +87,60 @@ export class ServerSession {
         const release = business ? this.gate.registerAuthorized(init.body) : this.gate.register(init.body);
         const signal = init.signal === undefined || init.signal === null ? lifetime : AbortSignal.any([lifetime, init.signal]);
         const headers = new Headers({ 'content-type': 'application/json', origin: this.baseUrl.origin });
-        const authorization = this.credentials.authorizationFor(this.config.authProfileId, target.href);
+        let authorization = this.credentials.authorizationFor(this.config.authProfileId, target.href);
         if (authorization !== undefined) headers.set('authorization', authorization);
         const initial = firstRequest; firstRequest = false;
-        const fields: LogFields = { endpoint: String(envelope.method), ...navigationFields(target.href, this.config.baseUrl) };
+        const fields: LogFields = { endpoint: String(envelope.method), ...navigationFields(target.href, this.config.baseUrl), proxyPolicy: this.config.proxyMode ?? 'system' };
+        let step: ConnectionStep = 'http-proxy';
         try {
           if (signal.aborted) throw faultForAbort(signal);
-          if (initial) this.recordTransport('http-request', 'begin', fields);
-          const response = await this.browserSession.fetch(target.href, {
+          if (initial) this.recordTransport(step, 'begin', fields);
+          await this.ready(signal);
+          if (initial) {
+            const proxy = await waitForSignal(this.browserSession.resolveProxy(target.href), signal);
+            this.recordTransport(step, 'complete', { ...fields, proxyMode: proxy === 'DIRECT' ? 'direct' : 'configured' });
+            if (this.config.proxyMode === 'direct' && proxy !== 'DIRECT') throw new ProtocolFault('unsupported');
+          }
+          if (authorization === undefined && !retryableRead(request) && this.credentials.knownScope(this.config.authProfileId, target.origin) !== undefined) {
+            // 写操作先做无正文认证预检；不会把已经发送的 prompt、cancel 或答案重发。
+            step = 'http-auth-check'; this.recordTransport(step, 'begin', fields);
+            const check = await this.browserSession.fetch(target.href, { method: 'HEAD', signal, headers: { origin: this.baseUrl.origin },
+              credentials: 'include', redirect: 'manual', cache: 'no-store' });
+            this.recordTransport(step, 'headers', { ...fields, httpStatus: check.status });
+            const scope = check.status === 401 ? basicChallengeScope(this.config.authProfileId, target.href, check.headers.get('www-authenticate')) : undefined;
+            const saved = scope === undefined ? undefined : this.credentials.get(scope);
+            await check.body?.cancel().catch(() => {});
+            if (scope !== undefined && saved !== undefined) {
+              this.credentials.set(scope, saved); this.credentials.authorizeTarget(scope, target.href);
+              authorization = this.credentials.authorizationFor(this.config.authProfileId, target.href);
+              if (authorization === undefined) throw new ProtocolFault('auth-required');
+              headers.set('authorization', authorization);
+            } else if (check.status === 401) throw new ProtocolFault('auth-required');
+          }
+          step = 'http-request';
+          if (signal.aborted) throw faultForAbort(signal);
+          if (initial) this.recordTransport(step, 'begin', fields);
+          let response = await this.browserSession.fetch(target.href, {
             ...init, signal, headers, credentials: 'include', redirect: 'manual', cache: 'no-store',
           });
+          // 只读请求可按真实挑战复用一次保存密码；不重发 prompt、cancel 或人工答案。
+          if (response.status === 401 && authorization === undefined && retryableRead(request)) {
+            const scope = basicChallengeScope(this.config.authProfileId, target.href, response.headers.get('www-authenticate'));
+            const saved = scope === undefined ? undefined : this.credentials.get(scope);
+            if (scope !== undefined && saved !== undefined) {
+              if (initial) this.recordTransport('http-response', 'headers', { ...fields, httpStatus: 401, responseType: responseCategory(response.headers.get('content-type')) });
+              await response.body?.cancel().catch(() => {});
+              this.credentials.set(scope, saved); this.credentials.authorizeTarget(scope, target.href);
+              authorization = this.credentials.authorizationFor(this.config.authProfileId, target.href);
+              if (authorization === undefined) throw new ProtocolFault('auth-required');
+              headers.set('authorization', authorization);
+              response = await this.browserSession.fetch(target.href, { ...init, signal, headers, credentials: 'include', redirect: 'manual', cache: 'no-store' });
+            }
+          }
+          if ([401, 403].includes(response.status) && authorization !== undefined) {
+            this.credentials.rejectFor(this.config.authProfileId, target.href, authorization);
+            await this.browserSession.clearAuthCache();
+          }
           if (initial) {
             let redirect: LogFields = {};
             const location = response.headers.get('location');
@@ -105,7 +158,7 @@ export class ServerSession {
         } catch (error) {
           const fault = signal.aborted ? faultForAbort(signal)
             : error instanceof ProtocolFault ? error : new ProtocolFault(isCertificateFailure(error) ? 'tls' : 'network');
-          if (initial || fault.kind !== 'cancelled') this.recordTransport('http-request', fault.kind === 'cancelled' ? 'cancelled' : 'failed', { ...fields, failureKind: fault.kind }, error);
+          if (initial || fault.kind !== 'cancelled') this.recordTransport(step, fault.kind === 'cancelled' ? 'cancelled' : 'failed', { ...fields, failureKind: fault.kind }, error);
           throw fault;
         } finally { release(); }
       },
@@ -119,12 +172,13 @@ export class ServerSession {
     const wsUrl = new URL(httpUrl);
     const protocol = httpUrl.protocol === 'https:' ? 'wss:' : 'ws:';
     wsUrl.protocol = protocol;
-    const fields: LogFields = { ...navigationFields(httpUrl.href, this.config.baseUrl), networkProtocol: protocol };
+    const fields: LogFields = { ...navigationFields(httpUrl.href, this.config.baseUrl), networkProtocol: protocol, proxyPolicy: this.config.proxyMode ?? 'system' };
     let step: ConnectionStep = 'ws-proxy';
     try {
       // Node WS 不自动继承 Chromium 的代理；不偷偷绕过系统代理直连。
       this.recordTransport(step, 'begin', fields);
-      const proxy = await this.browserSession.resolveProxy(wsUrl.href);
+      await this.ready(signal);
+      const proxy = await waitForSignal(this.browserSession.resolveProxy(wsUrl.href), signal);
       if (signal.aborted) throw faultForAbort(signal);
       this.recordTransport(step, 'complete', { ...fields, proxyMode: proxy === 'DIRECT' ? 'direct' : 'configured' });
       if (proxy !== 'DIRECT') throw new ProtocolFault('unsupported');
@@ -137,25 +191,48 @@ export class ServerSession {
         if (cookies.some(cookie => /[;\r\n]/u.test(cookie.name) || /[;\r\n]/u.test(cookie.value))) throw new ProtocolFault('protocol');
         headers.Cookie = cookies.map(cookie => `${cookie.name}=${cookie.value}`).join('; ');
       }
-      const authorization = this.credentials.authorizationFor(this.config.authProfileId, httpUrl.href);
-      if (authorization !== undefined) headers.Authorization = authorization;
-      this.recordTransport(step, 'begin', fields);
-      const socket = new WebSocket(wsUrl.href, {
-        headers, followRedirects: false, perMessageDeflate: false,
-        maxPayload: MAX_RESPONSE_BYTES,
-        ...(httpUrl.protocol === 'https:' ? tlsOptions() : {}),
-      });
-      socket.once('open', () => { if (!signal.aborted) this.recordTransport('ws-handshake', 'open', { ...fields, httpStatus: 101 }); });
-      // 载体尚未交给 mux 时也可能取消握手，不能让 error 事件成为未处理异常。
-      socket.on('error', error => {
-        if (!signal.aborted) this.recordTransport('ws-handshake', 'failed', { ...fields,
-          failureKind: isCertificateFailure(error) ? 'tls' : 'network' }, error);
-      });
-      const aborted = (): void => { socket.close(); };
-      signal.addEventListener('abort', aborted, { once: true });
-      socket.once('close', () => signal.removeEventListener('abort', aborted));
-      if (signal.aborted) aborted();
-      return socket;
+      let authorization = this.credentials.authorizationFor(this.config.authProfileId, httpUrl.href);
+      const openingSignal = AbortSignal.any([signal, AbortSignal.timeout(15000)]);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (openingSignal.aborted) throw faultForAbort(openingSignal);
+        const currentHeaders = { ...headers, ...(authorization === undefined ? {} : { Authorization: authorization }) };
+        this.recordTransport(step, 'begin', fields);
+        const socket = new WebSocket(wsUrl.href, {
+          headers: currentHeaders, followRedirects: false, perMessageDeflate: false,
+          maxPayload: MAX_RESPONSE_BYTES, ...(httpUrl.protocol === 'https:' ? tlsOptions() : {}),
+        });
+        let connected = false;
+        socket.on('error', error => {
+          if (connected && !signal.aborted) this.recordTransport('ws-handshake', 'failed', { ...fields,
+            failureKind: isCertificateFailure(error) ? 'tls' : 'network' }, error);
+        });
+        const aborted = (): void => { if (socket.readyState === WebSocket.OPEN) socket.close(); else if (socket.readyState !== WebSocket.CLOSED) socket.terminate(); };
+        signal.addEventListener('abort', aborted, { once: true }); socket.once('close', () => signal.removeEventListener('abort', aborted));
+        try {
+          await waitForWebSocket(socket, openingSignal);
+          if (signal.aborted) { aborted(); throw faultForAbort(signal); }
+          connected = true; this.recordTransport('ws-handshake', 'open', { ...fields, httpStatus: 101 });
+          return socket;
+        } catch (error) {
+          if (error instanceof SocketHandshakeFault) {
+            this.recordTransport('ws-handshake', 'headers', { ...fields, httpStatus: error.status });
+            if ([401, 403].includes(error.status) && authorization !== undefined) {
+              this.credentials.rejectFor(this.config.authProfileId, httpUrl.href, authorization); await this.browserSession.clearAuthCache();
+            }
+            const scope = error.status === 401 && authorization === undefined && attempt === 0
+              ? basicChallengeScope(this.config.authProfileId, httpUrl.href, error.challenge) : undefined;
+            const saved = scope === undefined ? undefined : this.credentials.get(scope);
+            if (scope !== undefined && saved !== undefined) {
+              this.credentials.set(scope, saved); this.credentials.authorizeTarget(scope, httpUrl.href);
+              authorization = this.credentials.authorizationFor(this.config.authProfileId, httpUrl.href);
+              if (authorization === undefined) throw new ProtocolFault('auth-required');
+              continue;
+            }
+          }
+          throw error;
+        }
+      }
+      throw new ProtocolFault('auth-required');
     } catch (error) {
       const fault = signal.aborted ? faultForAbort(signal)
         : error instanceof ProtocolFault ? error : new ProtocolFault(isCertificateFailure(error) ? 'tls' : 'network');
@@ -171,4 +248,15 @@ export class ServerSession {
       serverId: this.config.id, connectionStep: step, transportState: state,
     });
   }
+}
+
+function retryableRead(value: unknown): boolean {
+  try { assertReadRequest(value); return true; } catch { return false; }
+}
+function waitForSignal<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) { void work.catch(() => {}); return Promise.reject(faultForAbort(signal)); }
+  let abort: () => void = () => {};
+  const cancelled = new Promise<never>((_resolve, reject) => { abort = () => reject(faultForAbort(signal)); signal.addEventListener('abort', abort, { once: true }); });
+  if (signal.aborted) abort();
+  return Promise.race([work, cancelled]).finally(() => signal.removeEventListener('abort', abort));
 }

@@ -56,6 +56,8 @@ export function openAuthWindow(
   const loadRemote = async (contents: WebContents, url: string): Promise<void> => {
     recordNavigation('begin', navigationFields(url, config.baseUrl));
     try {
+      await session.ready();
+      if (completed || contents.isDestroyed()) throw new ProtocolFault('cancelled');
       await contents.loadURL(url);
       if (completed || contents.isDestroyed()) throw new ProtocolFault('cancelled');
       recordNavigation('complete', navigationFields(contents.getURL(), config.baseUrl));

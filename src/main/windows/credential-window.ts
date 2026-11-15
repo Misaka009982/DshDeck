@@ -10,15 +10,15 @@ import type { WindowAssets } from './window-assets.js';
 /** 提示窗是独立本地页面，密码不会进入工作台 renderer。 */
 export function promptCredential(
   parent: BrowserWindow,
-  description: { origin: string; realm: string },
-  accept: (input: CredentialInput) => void,
+  description: { origin: string; realm: string; username?: string; rememberAvailable?: boolean; remembered?: boolean; saveOnly?: boolean; usernameLocked?: boolean },
+  accept: (input: CredentialInput) => void | Promise<void>,
   assets: WindowAssets,
   ipc: IpcRegistry,
 ): Promise<CredentialInput | undefined> {
   return new Promise(resolve => {
     let settled = false;
     const window = new BrowserWindow({
-      width: 440, height: 390, resizable: false, parent, modal: true,
+      width: 470, height: 455, resizable: false, parent, modal: true,
       show: false, autoHideMenuBar: true, title: '服务器登录',
       webPreferences: localWebPreferences('dshdeck-credential-ui', join(assets.preloadRoot, 'credential-preload.cjs')),
     });
@@ -33,13 +33,14 @@ export function promptCredential(
     const cancelled = (): void => finish();
     ipc.bind(window, pathToFileURL(pagePath).href, {
       'credential:describe': () => ({ ...description }),
-      'credential:submit': value => {
+      'credential:submit': async value => {
+        if (settled || window.isDestroyed()) throw new ProtocolFault('cancelled');
         const record = requireRecord(value);
-        requireKeys(record, ['username', 'password']);
-        if (typeof record.username !== 'string' || typeof record.password !== 'string') throw new ProtocolFault('protocol');
-        const input = { username: record.username, password: record.password };
-        accept(input);
-        finish(input);
+        requireKeys(record, ['username', 'password'], ['remember']);
+        if (typeof record.username !== 'string' || typeof record.password !== 'string' || record.remember !== undefined && typeof record.remember !== 'boolean') throw new ProtocolFault('protocol');
+        const input = { username: record.username, password: record.password, remember: record.remember === true };
+        await accept(input);
+        if (!settled && !window.isDestroyed()) finish(input);
       },
       'credential:cancel': () => finish(),
     });

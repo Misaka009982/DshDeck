@@ -17,10 +17,10 @@ export function TaskBadge({ counts }: { counts: TaskCounts }) {
 }
 interface Props { readonly snapshot: WorkbenchSnapshot; readonly store: WorkbenchClientStore; readonly onAdd: () => void; readonly onEdit: (server: ServerRow) => void }
 export function SessionTree({ snapshot, store, onAdd, onEdit }: Props) {
-  const [query, setQuery] = useState<TreeQuery>({ text: '', filter: 'all', showArchived: false });
+  const [query, setQuery] = useState<TreeQuery>({ text: '', filter: 'all', showArchived: false, showSubagents: false });
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [connecting, setConnecting] = useState<Set<string>>(new Set());
-  const visible = filterTree(snapshot.servers, query);
+  const visible = filterTree(snapshot.servers, query, snapshot.selected);
   const toggle = (id: string): void => setCollapsed(previous => { const next = new Set(previous); if (next.has(id)) next.delete(id); else next.add(id); return next; });
   const connect = (id: string): void => {
     if (connecting.has(id)) return;
@@ -42,7 +42,7 @@ export function SessionTree({ snapshot, store, onAdd, onEdit }: Props) {
     const context = contextFor(server, workspaceId, session.sessionId);
     const selected = isSelected(context, snapshot.selected);
     return <div className={`session-row ${selected ? 'is-selected' : ''}`} key={session.sessionId} role="treeitem" aria-selected={selected}>
-      <button className="tree-select session-select" type="button" onClick={() => { void store.select(context); }} title={`${session.title}\n${server.config.alias} · ${session.sessionId}`}>
+      <button className="tree-select session-select" type="button" disabled={session.archived} onClick={() => { void store.select(context); }} title={`${session.title}\n${server.config.alias} › ${workspaceId === null ? '未归属工作区' : server.tree.find(workspace => workspace.workspaceId === workspaceId)?.title ?? '工作区'}\n会话 ID：${session.sessionId}`}>
         {session.task !== null ? <span className={`task-light light-${session.task} ${session.freshness === 'stale' ? 'is-stale' : ''}`} aria-label={`${colorText[session.task]}${session.freshness === 'stale' ? '（已过期）' : ''}`} /> : <span className="session-glyph" aria-hidden="true">◇</span>}
         <span className="session-label">{session.title}</span>
         {session.unread && <span className="unread-dot" aria-label="未读" />}
@@ -71,7 +71,7 @@ export function SessionTree({ snapshot, store, onAdd, onEdit }: Props) {
             <button type="button" disabled={connecting.has(server.config.id) || server.state === 'probing'} onClick={() => connect(server.config.id)}>连接</button>
             <button type="button" onClick={() => { void store.action(store.api.authenticateServer(server.config.id)); }}>重登</button>
             <button type="button" onClick={() => onEdit(server)}>编辑</button>
-            <button type="button" onClick={() => { void store.action(store.api.openFallback(server.config.id)); }} title="显式打开原站点，会使用原网页的业务传输">网页</button>
+            <button type="button" onClick={() => { void store.action(store.api.openWholeServer(server.config.id)); }} title="显式打开整站原网页，可查看未适配的布局与插件">整站</button>
           </div>}
           {!folded && <div role="group" className="server-children">
             {workspaces.map(workspace => {
@@ -92,7 +92,7 @@ export function SessionTree({ snapshot, store, onAdd, onEdit }: Props) {
       {visible.length === 0 && <div className="tree-empty large">{snapshot.servers.length === 0 ? '点击 ＋ 添加服务器' : '没有匹配项；可调整搜索与筛选。'}</div>}
     </div>
     {selectedFilteredOut(visible, snapshot.selected) && <div className="filtered-selection" role="status">当前会话被筛选隐藏；右侧仍保留当前上下文。</div>}
-    <label className="archive-toggle"><input type="checkbox" checked={query.showArchived} onChange={event => setQuery({ ...query, showArchived: event.target.checked })} />显示归档</label>
+    <label className="archive-toggle"><input type="checkbox" checked={query.showSubagents ?? false} onChange={event => setQuery({ ...query, showSubagents: event.target.checked })} />显示子智能体</label>
     <footer className="tree-footer"><TaskBadge counts={snapshot.counts} /><span>关注任务 · 部署待验证</span></footer>
   </aside>;
 }

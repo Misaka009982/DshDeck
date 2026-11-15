@@ -3,6 +3,7 @@ import type { ProbeSampleInput, ProbeSampleResult } from '../../shared/contracts
 import type { ProtocolFault } from '../../shared/faults.js';
 import type { DirectorySession } from '../state/directory-store.js';
 import type { WorkspaceReadFrame } from './read-values.js';
+import type { WebInteractionOwner } from './interaction-ownership.js';
 
 export interface AdapterCallbacks {
   readonly workspaces: (frame: WorkspaceReadFrame) => void;
@@ -33,5 +34,6 @@ export interface WorkbenchAdapter {
   answer(input: AnswerInput, signal: AbortSignal): Promise<void>;
   sample(input: ProbeSampleInput): Promise<ProbeSampleResult>;
   stopSample(): void;
+  setWebOwner?(owner: WebInteractionOwner | null): void;
   dispose(): void;
 }

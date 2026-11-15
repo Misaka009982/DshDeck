@@ -11,6 +11,8 @@ import { parseAssistantFrame, parseFollowSnapshot, parseHistory, parsePassiveSta
 import { RemoteRpc } from './rpc.js';
 import { RemoteMux } from './remote-stream.js';
 import { PendingInteractions, parseEventFrame } from './pending-interaction.js';
+import { nativeOwnsInteraction } from './interaction-ownership.js';
+import type { WebInteractionOwner } from './interaction-ownership.js';
 
 /** 固定公开协议适配器；目录/事件准入之后才接人工输入，不创建本地或远程 Agent。 */
 export class DshWebAdapter implements WorkbenchAdapter {
@@ -30,6 +32,7 @@ export class DshWebAdapter implements WorkbenchAdapter {
   private readonly answers = new Map<string, AbortController>();
   private readonly deliveries = new Map<string, AbortController>();
   private readonly sent = new Map<string, { text: string; state: 'sending' | 'accepted' | 'uncertain' }>();
+  private webOwner: WebInteractionOwner | null = null;
 
   constructor(readonly scope: ServerScope, private readonly transport: PocTransport, private readonly callbacks: AdapterCallbacks, lifetime: AbortSignal) {
     this.signal = AbortSignal.any([lifetime, this.controller.signal]);
@@ -133,6 +136,10 @@ export class DshWebAdapter implements WorkbenchAdapter {
   }
   async sample(_input: ProbeSampleInput): Promise<ProbeSampleResult> { throw new ProtocolFault('unsupported'); }
   stopSample(): void {}
+  setWebOwner(owner: WebInteractionOwner | null): void {
+    if (this.interactions.all().some(pending => !nativeOwnsInteraction(owner, pending.sessionId))) throw new ProtocolFault('conflict');
+    this.webOwner = owner === null ? null : { ...owner };
+  }
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true; this.ready = false;
@@ -161,7 +168,7 @@ export class DshWebAdapter implements WorkbenchAdapter {
         const deliverySignal = AbortSignal.any([this.signal, controller.signal]);
         void this.refreshSessions().then(async () => {
           if (deliverySignal.aborted) return;
-          if (this.summaries.some(session => session.sessionId === frame.agentId)) this.interactions.receive(frame);
+          if (nativeOwnsInteraction(this.webOwner, frame.agentId) && this.summaries.some(session => session.sessionId === frame.agentId)) this.interactions.receive(frame);
           else if (this.clientId !== null) {
             // 与官方 Client 的无可解析 Agent Context 行为一致：只交还 Host 链，不批准或回答。
             await this.read({ endpoint: '$events/result', payload: { args: { clientId: this.clientId, eventId: frame.eventId, outcome: { kind: 'next' } } } }, deliverySignal);

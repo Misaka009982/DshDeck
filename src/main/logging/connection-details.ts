@@ -15,11 +15,14 @@ export type NetworkCode = typeof NETWORK_CODES[number];
 const KNOWN_CODES = new Set<string>(NETWORK_CODES);
 export type NetworkProtocol = 'http:' | 'https:' | 'ws:' | 'wss:';
 export type ResponseCategory = 'json' | 'multipart' | 'html' | 'other' | 'missing';
+export type AddressKind = 'loopback' | 'tailnet-range' | 'private-ip' | 'public-ip' | 'ipv6' | 'hostname';
 export interface NavigationFields {
   readonly networkProtocol?: NetworkProtocol;
   readonly originMatchesBase?: boolean;
   readonly pathMatchesBase?: boolean;
   readonly targetLoopback?: boolean;
+  readonly targetAddressKind?: AddressKind;
+  readonly targetPort?: number;
 }
 
 /** 原始错误只用于辨识固定码；不返回 message、cause、请求地址或任意字符串。 */
@@ -48,7 +51,7 @@ export function isNavigationAborted(error: unknown, ended: boolean): boolean {
   } catch { return false; }
 }
 
-/** 只返回协议和匹配标记，不导出 URL、主机、端口、路径、查询或认证材料。 */
+/** 只返回协议、地址类别、端口和匹配标记，不导出主机、路径、查询或认证材料。 */
 export function navigationFields(target: string, baseUrl: string): NavigationFields {
   try {
     const url = new URL(target); const base = new URL(baseUrl);
@@ -58,8 +61,14 @@ export function navigationFields(target: string, baseUrl: string): NavigationFie
     // 仅识别明确的 loopback 字面值，不做 DNS 判断，也不用于授权。
     const loopback = host === 'localhost' || host === '[::1]'
       || (parts.length === 4 && parts[0] === '127' && parts.every(part => /^\d{1,3}$/u.test(part) && Number(part) <= 255));
+    const numbers = parts.map(Number);
+    const ipv4 = parts.length === 4 && parts.every(part => /^\d{1,3}$/u.test(part) && Number(part) <= 255);
+    const kind: AddressKind = loopback ? 'loopback' : !ipv4 ? host.startsWith('[') ? 'ipv6' : 'hostname'
+      : numbers[0] === 100 && (numbers[1] ?? 0) >= 64 && (numbers[1] ?? 0) <= 127 ? 'tailnet-range'
+      : numbers[0] === 10 || numbers[0] === 192 && numbers[1] === 168 || numbers[0] === 172 && (numbers[1] ?? 0) >= 16 && (numbers[1] ?? 0) <= 31 ? 'private-ip' : 'public-ip';
     return { networkProtocol: url.protocol, originMatchesBase: url.origin === base.origin,
-      pathMatchesBase: url.pathname.startsWith(base.pathname), targetLoopback: loopback };
+      pathMatchesBase: url.pathname.startsWith(base.pathname), targetLoopback: loopback,
+      targetAddressKind: kind, targetPort: Number(url.port || (url.protocol === 'https:' ? 443 : 80)) };
   } catch { return {}; }
 }
 

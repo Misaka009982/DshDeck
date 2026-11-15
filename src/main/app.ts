@@ -1,8 +1,9 @@
-import { app, clipboard, dialog } from 'electron';
+import { app, clipboard, dialog, protocol, safeStorage } from 'electron';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ServerStore } from './config/server-store.js';
 import { CredentialStore } from './auth/credential-store.js';
+import { CredentialVault } from './auth/credential-vault.js';
 import { ServerSession } from './auth/server-session.js';
 import { AuthService } from './auth/auth-service.js';
 import { BasicAuthBroker } from './auth/basic-auth-broker.js';
@@ -17,8 +18,11 @@ import { openMainWindow } from './windows/main-window.js';
 import { openAuthWindow } from './windows/auth-window.js';
 import type { WindowAssets } from './windows/window-assets.js';
 import { DiagnosticLogger } from './logging/diagnostic-logger.js';
+import { BackgroundService } from './appearance/background-service.js';
+import { WebLayoutSnapshots } from './browser/web-layout-snapshot.js';
 
 app.setName('DshDeck');
+protocol.registerSchemesAsPrivileged([{ scheme: 'dshdeck-image', privileges: { standard: true, secure: true } }]);
 const diagnostics = new DiagnosticLogger(join(app.getPath('userData'), 'logs'), {
   appVersion: app.getVersion(), electronVersion: process.versions.electron ?? 'unknown',
   nodeVersion: process.versions.node, chromeVersion: process.versions.chrome ?? 'unknown',
@@ -42,6 +46,7 @@ let auth: AuthService | undefined;
 let workbench: WorkbenchService | undefined;
 let ipc: IpcRegistry | undefined;
 let credentials: CredentialStore | undefined;
+let background: BackgroundService | undefined;
 let unsubscribeAuthLogs: (() => void) | undefined;
 let closing = false;
 let finalLogFlushed = false;
@@ -55,7 +60,12 @@ void app.whenReady().then(async () => {
     preloadRoot: fileURLToPath(new URL('../preload/', import.meta.url)),
   };
   const registry = new IpcRegistry(diagnostics); ipc = registry;
-  const store = new CredentialStore(); credentials = store;
+  const vault = new CredentialVault(join(app.getPath('userData'), 'basic-auth.json'), {
+    isEncryptionAvailable: () => safeStorage.isEncryptionAvailable() && (process.platform !== 'linux' || safeStorage.getSelectedStorageBackend() !== 'basic_text'),
+    encryptString: value => safeStorage.encryptString(value), decryptString: value => safeStorage.decryptString(value),
+  });
+  await vault.load();
+  const store = new CredentialStore(vault); credentials = store;
   const basicAuth = new BasicAuthBroker(store, assets, registry);
   const service = new AuthService(
     new ServerStore(join(app.getPath('userData'), 'servers.json')),
@@ -86,11 +96,17 @@ void app.whenReady().then(async () => {
     await workbench.initialize();
   }
   await service.initialize();
+  await store.keepProfiles(new Set(service.list().map(server => server.config.authProfileId))).catch(() => {});
   if (poc || workbench === undefined) { await openMainWindow(assets, registry, service); diagnostics.record('info', 'app-ready'); return; }
   const deck = workbench;
+  const images = new BackgroundService(deck.preferences, () => deck.refreshPresentation(), diagnostics); background = images;
+  await images.initialize(); deck.attachAppearance(images);
+  const layouts = new WebLayoutSnapshots(join(app.getPath('userData'), 'web-layout-snapshots'), diagnostics);
   let pet: PetCompanion | undefined;
-  const window = await openMainWindow(assets, registry, service, { workbench: deck, basicAuth, diagnostics,
+  const window = await openMainWindow(assets, registry, service, { workbench: deck, basicAuth, diagnostics, credentials: store, background: images, layouts,
     choosePetPath: async (kind, parent) => { if (pet === undefined) throw new ProtocolFault('unsupported'); await pet.choosePath(kind, parent); },
+    selectPet: async id => { if (pet === undefined) throw new ProtocolFault('unsupported'); await pet.selectPet(id); },
+    rescanPets: async () => { if (pet === undefined) throw new ProtocolFault('unsupported'); await pet.rescan(); },
   });
   const reveal = (): void => { if (!window.isDestroyed()) { window.show(); window.focus(); } };
   pet = new PetCompanion(deck.preferences, {
@@ -107,6 +123,7 @@ void app.whenReady().then(async () => {
     jump: task => { deck.validateScope(task.serverId, task.authProfileId, task.generation); deck.jump(task.serverId, task.sessionId); reveal(); },
     petNotice: notice => pet?.notify(notice),
   }));
+  await pet.rescan();
   await pet.setEnabled(deck.preferences.settings().petEnabled);
   diagnostics.record('info', 'app-ready');
 }).catch(error => {
@@ -127,8 +144,8 @@ app.on('before-quit', event => {
   if (closing) return;
   closing = true;
   unsubscribeAuthLogs?.();
-  workbench?.dispose(); auth?.dispose(); ipc?.dispose();
+  workbench?.dispose(); auth?.dispose(); ipc?.dispose(); background?.dispose();
   if (auth !== undefined && credentials !== undefined) for (const server of auth.list()) credentials.clear(server.config.authProfileId);
   diagnostics.record('info', 'app-quitting');
-  void diagnostics.flush().then(() => { finalLogFlushed = true; app.quit(); });
+  void Promise.all([diagnostics.flush(), credentials?.flush()]).then(() => { finalLogFlushed = true; app.quit(); });
 });

@@ -1,6 +1,6 @@
 import type { WebPreferences } from 'electron';
 
-/** 远程内容没有任何本地 IPC preload，也不能取得 Node 或弱化的浏览器权限。 */
+/** 默认远程内容不装工作台 preload；专用定位观察器只能在隔离世界读写固定导航键。 */
 export function remoteWebPreferences(partition: string): WebPreferences {
   return {
     partition,

@@ -1,6 +1,8 @@
 import { ProtocolFault, requireId, requireKeys, requireRecord } from './faults.js';
 import type { PublicFailure } from './faults.js';
 import type { ServerSnapshot, SessionBrief, WorkspaceBrief } from './contracts.js';
+import type { AppearanceView } from './appearance.js';
+import type { SessionWebState } from './session-web.js';
 
 export interface ServerScope {
   readonly serverId: string;
@@ -135,10 +137,15 @@ export interface WorkbenchSettings {
   readonly theme: 'system' | 'light' | 'dark';
   readonly petEnabled: boolean;
 }
+export interface PetChoice { readonly id: string; readonly name: string; readonly available: boolean; readonly message: string }
 export interface PetStatus {
   readonly state: 'disabled' | 'ready' | 'starting' | 'running' | 'unavailable' | 'failed';
   readonly runtimeRoot: string | null;
   readonly resourceRoot: string | null;
+  readonly choices?: readonly PetChoice[];
+  readonly selectedPetId?: string | null;
+  readonly scanning?: boolean;
+  readonly truncated?: boolean;
   readonly message: string;
 }
 export interface WorkbenchSnapshot {
@@ -151,6 +158,8 @@ export interface WorkbenchSnapshot {
   readonly settings: WorkbenchSettings;
   readonly pet: PetStatus;
   readonly demo: boolean;
+  readonly appearance?: AppearanceView;
+  readonly web?: SessionWebState;
 }
 export interface SendTextInput { readonly context: SessionContext; readonly requestId: string; readonly text: string }
 export interface AnswerInput { readonly context: SessionContext; readonly interactionId: string; readonly value: string }

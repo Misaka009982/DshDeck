@@ -1,5 +1,6 @@
 import { ProtocolFault, requireId, requireKeys, requireRecord } from '../../shared/faults.js';
 import type { SessionBrief, WorkspaceBrief } from '../../shared/contracts.js';
+import { parseSessionTitle } from '../../shared/session-title.js';
 
 interface WorkspaceBaseline {
   readonly items: readonly WorkspaceBrief[];
@@ -81,9 +82,32 @@ export function parseSessionList(value: unknown): readonly SessionBrief[] {
     if (typeof item.running !== 'boolean' || typeof item.agentAvailable !== 'boolean' || typeof item.blank !== 'boolean'
       || typeof item.updatedAt !== 'number' || !Number.isFinite(item.updatedAt)) throw new ProtocolFault('protocol');
     if (item.formatStatus !== undefined && item.formatStatus !== 'current' && item.formatStatus !== 'migration-required') throw new ProtocolFault('protocol');
+    if (item.origin !== undefined && item.origin !== 'subagent') throw new ProtocolFault('protocol');
+    let title: string | undefined;
+    let blank = item.blank && !item.running; let updatedAt = item.updatedAt;
+    let titleHint: SessionBrief['titleHint'];
+    if (item.projections !== undefined) {
+      const hints = requireRecord(item.projections); requireKeys(hints, ['kind', 'asOfSeq', 'values']);
+      if (hints.kind !== 'cached' && hints.kind !== 'sequenced') throw new ProtocolFault('protocol');
+      titleHint = { kind: hints.kind, asOfSeq: integer(hints.asOfSeq, -1) };
+      const values = requireRecord(hints.values);
+      title = parseSessionTitle(values.title);
+      if (values.sessionListMetadata !== undefined) {
+        const metadata = requireRecord(values.sessionListMetadata);
+        if (metadata.blank !== undefined && typeof metadata.blank !== 'boolean'
+          || metadata.lastPromptAt !== undefined && metadata.lastPromptAt !== null && (typeof metadata.lastPromptAt !== 'number' || !Number.isFinite(metadata.lastPromptAt))) throw new ProtocolFault('protocol');
+        if (metadata.blank === false) blank = false;
+        if (typeof metadata.lastPromptAt === 'number') updatedAt = Math.max(updatedAt, metadata.lastPromptAt);
+      }
+    }
     return {
-      sessionId: requireId(item.sessionId), updatedAt: item.updatedAt,
-      running: item.running, agentAvailable: item.agentAvailable, blank: item.blank,
+      sessionId: requireId(item.sessionId), updatedAt,
+      running: item.running, agentAvailable: item.agentAvailable, blank,
+      ...(title === undefined ? {} : { title }), ...(titleHint === undefined ? {} : { titleHint }),
+      ...(item.parentSessionId === undefined ? {} : { parentSessionId: requireId(item.parentSessionId) }),
+      ...(item.origin === undefined ? {} : { origin: 'subagent' as const }),
+      ...(item.cwd === undefined ? {} : { cwd: text(item.cwd) }),
+      ...(item.formatStatus === undefined ? {} : { formatStatus: item.formatStatus }),
     };
   });
   if (new Set(items.map(item => item.sessionId)).size !== items.length) throw new ProtocolFault('protocol');

@@ -5,13 +5,13 @@ import type { ConnectionState } from '../../shared/contracts.js';
 import { ProtocolFault, isRecord } from '../../shared/faults.js';
 import type { FaultKind } from '../../shared/faults.js';
 import { NETWORK_CODES, networkErrorCode } from './connection-details.js';
-import type { NetworkCode, NetworkProtocol, ResponseCategory } from './connection-details.js';
+import type { AddressKind, NetworkCode, NetworkProtocol, ResponseCategory } from './connection-details.js';
 
 export type LogLevel = 'info' | 'warn' | 'error';
 export type LogEvent = 'app-start' | 'app-ready' | 'app-quitting' | 'startup-failed' | 'main-fatal'
   | 'connection-state' | 'ipc-complete' | 'ipc-failed' | 'read-failed' | 'carrier-failed'
-  | 'renderer-gone' | 'renderer-failed' | 'child-process-gone' | 'page-load-failed' | 'transport-state';
-export type ConnectionStep = 'http-request' | 'http-response' | 'ws-proxy' | 'ws-handshake' | 'auth-navigation' | 'auth-finish';
+  | 'renderer-gone' | 'renderer-failed' | 'child-process-gone' | 'page-load-failed' | 'transport-state' | 'web-view-state' | 'background-failed' | 'web-layout-cached';
+export type ConnectionStep = 'http-proxy' | 'http-auth-check' | 'http-request' | 'http-response' | 'ws-proxy' | 'ws-handshake' | 'auth-navigation' | 'auth-finish';
 export type TransportState = 'begin' | 'headers' | 'open' | 'complete' | 'failed' | 'cancelled' | 'blocked';
 export interface SoftwareInfo {
   readonly appVersion: string;
@@ -47,6 +47,10 @@ export interface LogFields {
   readonly httpStatus?: number;
   readonly responseType?: ResponseCategory;
   readonly proxyMode?: 'direct' | 'configured';
+  readonly proxyPolicy?: 'system' | 'direct';
+  readonly targetAddressKind?: AddressKind;
+  readonly targetPort?: number;
+  readonly webState?: 'closed' | 'loading' | 'ready' | 'failed';
   readonly originMatchesBase?: boolean;
   readonly pathMatchesBase?: boolean;
   readonly targetLoopback?: boolean;
@@ -63,12 +67,13 @@ interface LogEntry {
 interface LogOptions { readonly enabled?: boolean; readonly maxFileBytes?: number; readonly backups?: number; readonly historyLimit?: number }
 export const DEFAULT_LOG_OPTIONS = { enabled: true, maxFileBytes: 2 * 1024 * 1024, backups: 3, historyLimit: 120 } as const;
 const EVENTS = new Set<LogEvent>(['app-start', 'app-ready', 'app-quitting', 'startup-failed', 'main-fatal', 'connection-state',
-  'ipc-complete', 'ipc-failed', 'read-failed', 'carrier-failed', 'renderer-gone', 'renderer-failed', 'child-process-gone', 'page-load-failed', 'transport-state']);
-const STEPS = new Set<ConnectionStep>(['http-request', 'http-response', 'ws-proxy', 'ws-handshake', 'auth-navigation', 'auth-finish']);
+  'ipc-complete', 'ipc-failed', 'read-failed', 'carrier-failed', 'renderer-gone', 'renderer-failed', 'child-process-gone', 'page-load-failed', 'transport-state', 'web-view-state', 'background-failed', 'web-layout-cached']);
+const STEPS = new Set<ConnectionStep>(['http-proxy', 'http-auth-check', 'http-request', 'http-response', 'ws-proxy', 'ws-handshake', 'auth-navigation', 'auth-finish']);
 const TRANSPORT_STATES = new Set<TransportState>(['begin', 'headers', 'open', 'complete', 'failed', 'cancelled', 'blocked']);
 const NETWORK_ERRORS = new Set<string>(NETWORK_CODES);
 const NETWORK_PROTOCOLS = new Set<NetworkProtocol>(['http:', 'https:', 'ws:', 'wss:']);
 const RESPONSE_TYPES = new Set<ResponseCategory>(['json', 'multipart', 'html', 'other', 'missing']);
+const ADDRESS_KINDS = new Set<AddressKind>(['loopback', 'tailnet-range', 'private-ip', 'public-ip', 'ipv6', 'hostname']);
 const ENDPOINTS = new Set(['workspace/follow', 'session/list', 'session/follow', 'session/events', 'session/state',
   'session/observeState', 'session/control', 'session/prompt', 'session/cancel', '$events', '$events/result']);
 const STATES = new Set<ConnectionState>(['idle', 'authenticating', 'probing', 'readonly-ready', 'auth-required', 'denied', 'incompatible', 'failed', 'cancelled']);
@@ -77,14 +82,14 @@ const FAULTS = new Set<string>(['auth-required', 'forbidden', 'not-found', 'logi
 const OPERATIONS = new Set(['app:list-servers', 'app:add-server', 'app:edit-server', 'app:connect-server',
   'app:authenticate-server', 'app:disconnect-server', 'app:run-sample', 'app:stop-sample', 'app:workbench', 'app:select-session',
   'app:set-followed', 'app:set-manual-unread', 'app:set-draft', 'app:send-text', 'app:stop-remote', 'app:answer', 'app:sync-now',
-  'app:load-older', 'app:confirm-read', 'app:update-settings', 'app:open-fallback', 'app:close-fallback', 'app:choose-pet-path',
-  'app:set-demo', 'app:open-logs', 'app:copy-diagnostics', 'app:renderer-failure', 'auth:describe', 'auth:navigate', 'auth:finish', 'auth:cancel',
-  'credential:describe', 'credential:submit', 'credential:cancel']);
+  'app:load-older', 'app:confirm-read', 'app:update-settings', 'app:open-fallback', 'app:close-fallback', 'app:choose-pet-path', 'app:select-pet', 'app:rescan-pets',
+  'app:set-demo', 'app:open-logs', 'app:copy-diagnostics', 'app:renderer-failure', 'app:basic-credential-info', 'app:edit-basic-credentials', 'app:forget-basic-credentials', 'auth:describe', 'auth:navigate', 'auth:finish', 'auth:cancel',
+  'credential:describe', 'credential:submit', 'credential:cancel', 'app:update-appearance', 'app:choose-background', 'app:clear-background', 'app:set-web-viewport', 'app:cache-web-layout', 'app:command-menu', 'app:toggle-web-sidebar', 'app:show-web-files', 'app:show-web-conversation', 'app:open-web-layouts', 'app:open-server-web']);
 const ERROR_NAMES = new Set(['Error', 'TypeError', 'SyntaxError', 'RangeError', 'AbortError', 'ProtocolFault', 'UnexpectedError']);
 const REASONS = new Set(['clean-exit', 'abnormal-exit', 'killed', 'crashed', 'oom', 'launch-failed', 'integrity-failure', 'error', 'unhandled-rejection', 'preload-error']);
 const VIEW_TYPES = new Set(['window', 'webview', 'offscreen', 'remote', 'webContentsView', 'browserView', 'backgroundPage']);
 const PROCESS_TYPES = new Set(['GPU', 'Utility', 'Browser', 'Renderer', 'Zygote', 'Sandbox helper', 'Pepper Plugin']);
-const SOURCE_NAMES = '(?:app|auth-service|server-session|credential-store|basic-auth-broker|main-window|auth-window|credential-window|fallback-view|ipc-registry|workbench-service|directory-store|session-state|dsh-web-adapter|rpc|read-only-rpc|read-only-mux|pending-interaction|session-cache|session-reconciler|sync-scheduler|pet-companion|diagnostic-logger|connection-details|app-preload|auth-preload|credential-preload|workbench)';
+const SOURCE_NAMES = '(?:app|auth-service|server-session|credential-store|credential-vault|basic-auth-broker|basic-challenge|ws-handshake|main-window|auth-window|credential-window|fallback-view|session-web-view|background-service|image-size|web-layout-snapshot|ipc-registry|workbench-service|directory-store|session-state|dsh-web-adapter|rpc|read-only-rpc|read-only-mux|pending-interaction|session-cache|session-reconciler|sync-scheduler|pet-companion|pet-library|pet-assets|diagnostic-logger|connection-details|app-preload|auth-preload|credential-preload|session-web-preload|workbench)';
 const FRAME = new RegExp(`^${SOURCE_NAMES}\\.(?:js|cjs|ts):\\d{1,8}:\\d{1,8}$`, 'u');
 const STACK_FRAME = new RegExp(`[/\\\\](${SOURCE_NAMES}\\.(?:js|cjs|ts):\\d{1,8}:\\d{1,8})`, 'gu');
 const MAX_ENTRY_BYTES = 4096;
@@ -108,7 +113,11 @@ export function sanitizeLogFields(value: unknown): Readonly<Record<string, unkno
   if (typeof value.networkProtocol === 'string' && NETWORK_PROTOCOLS.has(value.networkProtocol as NetworkProtocol)) fields.networkProtocol = value.networkProtocol;
   if (typeof value.responseType === 'string' && RESPONSE_TYPES.has(value.responseType as ResponseCategory)) fields.responseType = value.responseType;
   if (value.proxyMode === 'direct' || value.proxyMode === 'configured') fields.proxyMode = value.proxyMode;
+  if (value.proxyPolicy === 'system' || value.proxyPolicy === 'direct') fields.proxyPolicy = value.proxyPolicy;
+  if (typeof value.targetAddressKind === 'string' && ADDRESS_KINDS.has(value.targetAddressKind as AddressKind)) fields.targetAddressKind = value.targetAddressKind;
+  if (typeof value.targetPort === 'number' && Number.isSafeInteger(value.targetPort) && value.targetPort > 0 && value.targetPort <= 65535) fields.targetPort = value.targetPort;
   if (typeof value.state === 'string' && STATES.has(value.state as ConnectionState)) fields.state = value.state;
+  if (value.webState === 'closed' || value.webState === 'loading' || value.webState === 'ready' || value.webState === 'failed') fields.webState = value.webState;
   if (typeof value.failureKind === 'string' && FAULTS.has(value.failureKind)) fields.failureKind = value.failureKind;
   if (typeof value.operation === 'string' && OPERATIONS.has(value.operation)) fields.operation = value.operation;
   if (typeof value.reason === 'string' && REASONS.has(value.reason)) fields.reason = value.reason;

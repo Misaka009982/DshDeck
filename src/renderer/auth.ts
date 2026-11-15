@@ -13,7 +13,7 @@ form.addEventListener('submit', event => {
   const target = link.value.trim() || baseUrl;
   link.value = '';
   void api.navigate(target).then(result => {
-    note.textContent = result.ok ? '完成网页登录后点击“已登录，验证连接”。页面的 dsh 业务流保持禁用。' : result.error.message;
+    note.textContent = result.ok ? '页面已加载；完成网页登录后点击“已登录，验证连接”。验证使用左侧保存的入口，临时链接不会替换它；原网页业务流仍禁用。' : result.error.message;
   });
 });
 (document.getElementById('finish-auth') as HTMLButtonElement).addEventListener('click', () => { link.value = ''; void api.finish(); });

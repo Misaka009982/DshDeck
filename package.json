@@ -1,6 +1,6 @@
 {
   "name": "dshdeck",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "DshDeck 多服务器 dsh 会话工作台",
   "type": "module",

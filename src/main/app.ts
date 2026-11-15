@@ -59,8 +59,8 @@ void app.whenReady().then(async () => {
   const basicAuth = new BasicAuthBroker(store, assets, registry);
   const service = new AuthService(
     new ServerStore(join(app.getPath('userData'), 'servers.json')),
-    config => new ServerSession(config, store),
-    (config, session, callbacks) => openAuthWindow(config, session, callbacks, assets, registry, basicAuth),
+    config => new ServerSession(config, store, diagnostics),
+    (config, session, callbacks) => openAuthWindow(config, session, callbacks, assets, registry, basicAuth, diagnostics),
     poc ? undefined : (session, generation, signal, failed) => {
       if (workbench === undefined) throw new ProtocolFault('unsupported');
       return workbench.createAdapter(session, generation, signal, failed);

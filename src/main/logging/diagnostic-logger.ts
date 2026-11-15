@@ -4,11 +4,15 @@ import { join } from 'node:path';
 import type { ConnectionState } from '../../shared/contracts.js';
 import { ProtocolFault, isRecord } from '../../shared/faults.js';
 import type { FaultKind } from '../../shared/faults.js';
+import { NETWORK_CODES, networkErrorCode } from './connection-details.js';
+import type { NetworkCode, NetworkProtocol, ResponseCategory } from './connection-details.js';
 
 export type LogLevel = 'info' | 'warn' | 'error';
 export type LogEvent = 'app-start' | 'app-ready' | 'app-quitting' | 'startup-failed' | 'main-fatal'
   | 'connection-state' | 'ipc-complete' | 'ipc-failed' | 'read-failed' | 'carrier-failed'
-  | 'renderer-gone' | 'renderer-failed' | 'child-process-gone' | 'page-load-failed';
+  | 'renderer-gone' | 'renderer-failed' | 'child-process-gone' | 'page-load-failed' | 'transport-state';
+export type ConnectionStep = 'http-request' | 'http-response' | 'ws-proxy' | 'ws-handshake' | 'auth-navigation' | 'auth-finish';
+export type TransportState = 'begin' | 'headers' | 'open' | 'complete' | 'failed' | 'cancelled' | 'blocked';
 export interface SoftwareInfo {
   readonly appVersion: string;
   readonly electronVersion: string;
@@ -35,6 +39,19 @@ export interface LogFields {
   readonly processType?: string;
   readonly errorName?: string;
   readonly frames?: readonly string[];
+  readonly connectionStep?: ConnectionStep;
+  readonly transportState?: TransportState;
+  readonly endpoint?: string;
+  readonly networkCode?: NetworkCode;
+  readonly networkProtocol?: NetworkProtocol;
+  readonly httpStatus?: number;
+  readonly responseType?: ResponseCategory;
+  readonly proxyMode?: 'direct' | 'configured';
+  readonly originMatchesBase?: boolean;
+  readonly pathMatchesBase?: boolean;
+  readonly targetLoopback?: boolean;
+  readonly redirectChangesOrigin?: boolean;
+  readonly redirectToLoopback?: boolean;
 }
 interface LogEntry {
   readonly at: string;
@@ -46,7 +63,14 @@ interface LogEntry {
 interface LogOptions { readonly enabled?: boolean; readonly maxFileBytes?: number; readonly backups?: number; readonly historyLimit?: number }
 export const DEFAULT_LOG_OPTIONS = { enabled: true, maxFileBytes: 2 * 1024 * 1024, backups: 3, historyLimit: 120 } as const;
 const EVENTS = new Set<LogEvent>(['app-start', 'app-ready', 'app-quitting', 'startup-failed', 'main-fatal', 'connection-state',
-  'ipc-complete', 'ipc-failed', 'read-failed', 'carrier-failed', 'renderer-gone', 'renderer-failed', 'child-process-gone', 'page-load-failed']);
+  'ipc-complete', 'ipc-failed', 'read-failed', 'carrier-failed', 'renderer-gone', 'renderer-failed', 'child-process-gone', 'page-load-failed', 'transport-state']);
+const STEPS = new Set<ConnectionStep>(['http-request', 'http-response', 'ws-proxy', 'ws-handshake', 'auth-navigation', 'auth-finish']);
+const TRANSPORT_STATES = new Set<TransportState>(['begin', 'headers', 'open', 'complete', 'failed', 'cancelled', 'blocked']);
+const NETWORK_ERRORS = new Set<string>(NETWORK_CODES);
+const NETWORK_PROTOCOLS = new Set<NetworkProtocol>(['http:', 'https:', 'ws:', 'wss:']);
+const RESPONSE_TYPES = new Set<ResponseCategory>(['json', 'multipart', 'html', 'other', 'missing']);
+const ENDPOINTS = new Set(['workspace/follow', 'session/list', 'session/follow', 'session/events', 'session/state',
+  'session/observeState', 'session/control', 'session/prompt', 'session/cancel', '$events', '$events/result']);
 const STATES = new Set<ConnectionState>(['idle', 'authenticating', 'probing', 'readonly-ready', 'auth-required', 'denied', 'incompatible', 'failed', 'cancelled']);
 const FAULTS = new Set<string>(['auth-required', 'forbidden', 'not-found', 'login-response', 'protocol', 'unsupported', 'network',
   'tls', 'cancelled', 'budget', 'timeout', 'conflict', 'uncertain', 'unexpected']);
@@ -60,7 +84,7 @@ const ERROR_NAMES = new Set(['Error', 'TypeError', 'SyntaxError', 'RangeError', 
 const REASONS = new Set(['clean-exit', 'abnormal-exit', 'killed', 'crashed', 'oom', 'launch-failed', 'integrity-failure', 'error', 'unhandled-rejection', 'preload-error']);
 const VIEW_TYPES = new Set(['window', 'webview', 'offscreen', 'remote', 'webContentsView', 'browserView', 'backgroundPage']);
 const PROCESS_TYPES = new Set(['GPU', 'Utility', 'Browser', 'Renderer', 'Zygote', 'Sandbox helper', 'Pepper Plugin']);
-const SOURCE_NAMES = '(?:app|auth-service|server-session|credential-store|basic-auth-broker|main-window|auth-window|credential-window|fallback-view|ipc-registry|workbench-service|directory-store|session-state|dsh-web-adapter|rpc|read-only-rpc|read-only-mux|pending-interaction|session-cache|session-reconciler|sync-scheduler|pet-companion|diagnostic-logger|app-preload|auth-preload|credential-preload|workbench)';
+const SOURCE_NAMES = '(?:app|auth-service|server-session|credential-store|basic-auth-broker|main-window|auth-window|credential-window|fallback-view|ipc-registry|workbench-service|directory-store|session-state|dsh-web-adapter|rpc|read-only-rpc|read-only-mux|pending-interaction|session-cache|session-reconciler|sync-scheduler|pet-companion|diagnostic-logger|connection-details|app-preload|auth-preload|credential-preload|workbench)';
 const FRAME = new RegExp(`^${SOURCE_NAMES}\\.(?:js|cjs|ts):\\d{1,8}:\\d{1,8}$`, 'u');
 const STACK_FRAME = new RegExp(`[/\\\\](${SOURCE_NAMES}\\.(?:js|cjs|ts):\\d{1,8}:\\d{1,8})`, 'gu');
 const MAX_ENTRY_BYTES = 4096;
@@ -73,7 +97,17 @@ export function sanitizeLogFields(value: unknown): Readonly<Record<string, unkno
   for (const key of ['generation', 'workspaceCount', 'sessionCount', 'errorCode', 'exitCode', 'rendererLine', 'rendererColumn'] as const) {
     if (typeof value[key] === 'number' && Number.isSafeInteger(value[key])) fields[key] = value[key];
   }
-  if (typeof value.mainFrame === 'boolean') fields.mainFrame = value.mainFrame;
+  for (const key of ['mainFrame', 'originMatchesBase', 'pathMatchesBase', 'targetLoopback', 'redirectChangesOrigin', 'redirectToLoopback'] as const) {
+    if (typeof value[key] === 'boolean') fields[key] = value[key];
+  }
+  if (typeof value.httpStatus === 'number' && Number.isSafeInteger(value.httpStatus) && value.httpStatus >= 100 && value.httpStatus <= 599) fields.httpStatus = value.httpStatus;
+  if (typeof value.connectionStep === 'string' && STEPS.has(value.connectionStep as ConnectionStep)) fields.connectionStep = value.connectionStep;
+  if (typeof value.transportState === 'string' && TRANSPORT_STATES.has(value.transportState as TransportState)) fields.transportState = value.transportState;
+  if (typeof value.endpoint === 'string' && ENDPOINTS.has(value.endpoint)) fields.endpoint = value.endpoint;
+  if (typeof value.networkCode === 'string' && NETWORK_ERRORS.has(value.networkCode)) fields.networkCode = value.networkCode;
+  if (typeof value.networkProtocol === 'string' && NETWORK_PROTOCOLS.has(value.networkProtocol as NetworkProtocol)) fields.networkProtocol = value.networkProtocol;
+  if (typeof value.responseType === 'string' && RESPONSE_TYPES.has(value.responseType as ResponseCategory)) fields.responseType = value.responseType;
+  if (value.proxyMode === 'direct' || value.proxyMode === 'configured') fields.proxyMode = value.proxyMode;
   if (typeof value.state === 'string' && STATES.has(value.state as ConnectionState)) fields.state = value.state;
   if (typeof value.failureKind === 'string' && FAULTS.has(value.failureKind)) fields.failureKind = value.failureKind;
   if (typeof value.operation === 'string' && OPERATIONS.has(value.operation)) fields.operation = value.operation;
@@ -87,12 +121,14 @@ export function sanitizeLogFields(value: unknown): Readonly<Record<string, unkno
 
 /** 不保留 message/cause/完整 stack，只留下安全分类及本应用已知文件的行列号。 */
 export function describeLogError(error: unknown): LogFields {
-  if (!(error instanceof Error)) return { failureKind: 'unexpected', errorName: 'UnexpectedError' };
+  const networkCode = networkErrorCode(error);
+  const network: Pick<LogFields, 'networkCode'> = networkCode === undefined ? {} : { networkCode };
+  if (!(error instanceof Error)) return { failureKind: 'unexpected', errorName: 'UnexpectedError', ...network };
   const stack = error.stack;
   const frames = typeof stack === 'string' ? [...stack.slice(0, 16384).matchAll(STACK_FRAME)]
     .flatMap(match => match[1] === undefined ? [] : [match[1]]).slice(0, 6) : [];
   return { failureKind: error instanceof ProtocolFault ? error.kind : 'unexpected',
-    errorName: ERROR_NAMES.has(error.name) ? error.name : 'UnexpectedError', frames };
+    errorName: ERROR_NAMES.has(error.name) ? error.name : 'UnexpectedError', frames, ...network };
 }
 
 /** 默认本机滚动日志；磁盘失败时保留内存诊断，不阻塞业务或递归记录日志错误。 */

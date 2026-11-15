@@ -35,6 +35,12 @@ export class ProtocolFault extends Error {
   }
 }
 
+export function faultForAbort(signal: AbortSignal): ProtocolFault {
+  // 超时和用户取消使用同一 abort 机制，但不能对用户报告成同一种结果。
+  const reason: unknown = signal.reason;
+  return new ProtocolFault(isRecord(reason) && reason.name === 'TimeoutError' ? 'timeout' : 'cancelled');
+}
+
 export function toPublicFailure(error: unknown): PublicFailure {
   const fault = error instanceof ProtocolFault ? error : new ProtocolFault('network');
   return { kind: fault.kind, message: fault.message };

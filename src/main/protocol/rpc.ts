@@ -1,7 +1,7 @@
 import { Context } from '@deepseek-ai/cordis';
 import { installConnection } from '@deepseek-ai/dsh-client-connection/client';
 import type { ClientConnectionRpc, ConnectionHandle, RpcFetch } from '@deepseek-ai/dsh-client-connection/client';
-import { ProtocolFault, remoteFault } from '../../shared/faults.js';
+import { ProtocolFault, faultForAbort, remoteFault } from '../../shared/faults.js';
 import { assertBusinessRequest } from './business-policy.js';
 import type { BusinessRequest } from './business-policy.js';
 import { acceptRpcResponse, MAX_RESPONSE_BYTES } from './http-response.js';
@@ -16,7 +16,8 @@ export class RemoteRpc {
       let response: Response;
       try { response = await fetch(input, init); }
       catch (error) {
-        if (this.lifetime.signal.aborted || init.signal?.aborted) throw new ProtocolFault('cancelled');
+        if (this.lifetime.signal.aborted) throw faultForAbort(this.lifetime.signal);
+        if (init.signal?.aborted) throw faultForAbort(init.signal);
         throw error instanceof ProtocolFault ? error : new ProtocolFault('network');
       }
       return acceptRpcResponse(response, MAX_RESPONSE_BYTES, this.onBytes);
@@ -28,14 +29,14 @@ export class RemoteRpc {
   async call(request: BusinessRequest, signal: AbortSignal): Promise<unknown> {
     assertBusinessRequest(request);
     const combined = AbortSignal.any([this.lifetime.signal, signal]);
-    if (combined.aborted) throw new ProtocolFault('cancelled');
+    if (combined.aborted) throw faultForAbort(combined);
     try {
       const result = await this.rpc.call('/api', request.endpoint, request.payload, combined);
-      if (combined.aborted) throw new ProtocolFault('cancelled');
+      if (combined.aborted) throw faultForAbort(combined);
       if (!result.ok) throw remoteFault(result.error.code);
       return result.value;
     } catch (error) {
-      if (combined.aborted) throw new ProtocolFault('cancelled');
+      if (combined.aborted) throw faultForAbort(combined);
       throw error instanceof ProtocolFault ? error : new ProtocolFault('protocol');
     }
   }

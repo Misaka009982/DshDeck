@@ -12,6 +12,10 @@ import { IpcRegistry } from '../security/ipc-registry.js';
 import { localWebPreferences, remoteWebPreferences } from './security-options.js';
 import type { WindowAssets } from './window-assets.js';
 import { closeRemotePage } from './close-remote-page.js';
+import { isCertificateFailure } from '../auth/tls-policy.js';
+import { isNavigationAborted, navigationFields } from '../logging/connection-details.js';
+import { describeLogError } from '../logging/diagnostic-logger.js';
+import type { DiagnosticLogger, LogFields, TransportState } from '../logging/diagnostic-logger.js';
 
 /** 本地控制栏有窄 IPC；远程登录视图和 SSO 弹窗没有 preload。 */
 export function openAuthWindow(
@@ -21,6 +25,7 @@ export function openAuthWindow(
   assets: WindowAssets,
   ipc: IpcRegistry,
   basicAuth: BasicAuthBroker,
+  diagnostics?: DiagnosticLogger,
 ): AuthWindowHandle {
   const window = new BrowserWindow({
     width: 1000, height: 760, minWidth: 760, minHeight: 520,
@@ -41,6 +46,28 @@ export function openAuthWindow(
   };
   window.on('resize', layout);
   layout();
+
+  const recordNavigation = (state: TransportState, fields: LogFields, error?: unknown): void => {
+    diagnostics?.record(state === 'failed' ? 'warn' : 'info', 'transport-state', {
+      ...(error === undefined ? {} : describeLogError(error)), ...fields,
+      serverId: config.id, connectionStep: 'auth-navigation', transportState: state,
+    });
+  };
+  const loadRemote = async (contents: WebContents, url: string): Promise<void> => {
+    recordNavigation('begin', navigationFields(url, config.baseUrl));
+    try {
+      await contents.loadURL(url);
+      if (completed || contents.isDestroyed()) throw new ProtocolFault('cancelled');
+      recordNavigation('complete', navigationFields(contents.getURL(), config.baseUrl));
+    } catch (error) {
+      const cancelled = (error instanceof ProtocolFault && error.kind === 'cancelled')
+        || isNavigationAborted(error, completed || contents.isDestroyed());
+      const fault = cancelled ? new ProtocolFault('cancelled')
+        : new ProtocolFault(isCertificateFailure(error) ? 'tls' : 'network');
+      recordNavigation(cancelled ? 'cancelled' : 'failed', { ...navigationFields(url, config.baseUrl), failureKind: fault.kind }, error);
+      throw fault;
+    }
+  };
 
   const endRemotePage = async (): Promise<void> => {
     for (const popup of popups) if (!popup.isDestroyed()) popup.destroy();
@@ -83,7 +110,7 @@ export function openAuthWindow(
       if (isHttpNavigation(url) && allowedOrigins.has(new URL(url).origin)) return;
       event.preventDefault();
       void approveOrigin(url).then(allowed => {
-        if (allowed && !completed && !contents.isDestroyed()) void contents.loadURL(url).catch(() => {});
+        if (allowed && !completed && !contents.isDestroyed()) void loadRemote(contents, url).catch(() => {});
       });
     };
     contents.on('will-navigate', navigate);
@@ -125,10 +152,14 @@ export function openAuthWindow(
       if (!await approveOrigin(value)) throw new ProtocolFault('cancelled');
       basicAuth.reset(config.authProfileId);
       if (completed || view.webContents.isDestroyed()) throw new ProtocolFault('cancelled');
-      await view.webContents.loadURL(value).catch(() => { throw new ProtocolFault('network'); });
+      await loadRemote(view.webContents, value);
     },
     'auth:finish': async () => {
       if (completed) throw new ProtocolFault('cancelled');
+      const fields = navigationFields(view.webContents.isDestroyed() ? '' : view.webContents.getURL(), config.baseUrl);
+      diagnostics?.record(fields.originMatchesBase === false || fields.pathMatchesBase === false ? 'warn' : 'info', 'transport-state', {
+        ...fields, serverId: config.id, connectionStep: 'auth-finish', transportState: 'begin',
+      });
       completed = true;
       await endRemotePage();
       if (!window.isDestroyed()) window.destroy();
@@ -139,7 +170,7 @@ export function openAuthWindow(
   window.once('close', cancel);
   window.once('ready-to-show', () => { if (!window.isDestroyed()) window.show(); });
   void window.loadFile(pagePath).catch(cancel);
-  void view.webContents.loadURL(config.baseUrl).catch(() => {});
+  void loadRemote(view.webContents, config.baseUrl).catch(() => {});
   return {
     focus: () => { if (!window.isDestroyed()) { window.show(); window.focus(); } },
     close: cancel,

@@ -1,0 +1,50 @@
+{
+  "$schema": "https://www.electron.build/schema.json",
+  "appId": "io.dshdeck.app",
+  "productName": "DshDeck",
+  "asar": true,
+  "directories": {
+    "output": "release"
+  },
+  "files": [
+    "package.json",
+    "dist/src/main/**/*.js",
+    "dist/src/preload/*.cjs",
+    "dist/src/shared/**/*.js",
+    "dist/tools/poc/**/*.js",
+    "dist/renderer/workbench.js",
+    "dist/src/renderer/auth.js",
+    "dist/src/renderer/credential.js",
+    "src/renderer/workbench.html",
+    "src/renderer/auth.html",
+    "src/renderer/credential.html",
+    "src/renderer/styles.css",
+    "src/renderer/workbench.css",
+    "!docs/**",
+    "!tests/**",
+    "!dist/tests/**",
+    "!**/*.map",
+    "!**/*.tsbuildinfo",
+    "!**/*.log",
+    "!**/.env",
+    "!**/.env.*"
+  ],
+  "win": {
+    "target": [
+      {
+        "target": "nsis",
+        "arch": ["x64"]
+      }
+    ],
+    "artifactName": "DshDeck-Setup-${version}-${arch}.${ext}"
+  },
+  "nsis": {
+    "oneClick": false,
+    "perMachine": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "deleteAppDataOnUninstall": false
+  },
+  "publish": null
+}

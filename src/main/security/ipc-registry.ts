@@ -1,0 +1,54 @@
+import { ipcMain } from 'electron';
+import type { BrowserWindow, IpcMainInvokeEvent } from 'electron';
+import { ProtocolFault, toPublicFailure } from '../../shared/faults.js';
+import { isTrustedIpcSender } from './ipc-policy.js';
+
+export const IPC_CHANNELS = [
+  'app:list-servers', 'app:add-server', 'app:edit-server', 'app:connect-server',
+  'app:authenticate-server', 'app:disconnect-server', 'app:run-sample', 'app:stop-sample',
+  'app:workbench', 'app:select-session', 'app:set-followed', 'app:set-manual-unread', 'app:set-draft',
+  'app:send-text', 'app:stop-remote', 'app:answer', 'app:sync-now', 'app:load-older', 'app:confirm-read',
+  'app:update-settings', 'app:open-fallback', 'app:close-fallback', 'app:choose-pet-path', 'app:set-demo',
+  'auth:describe', 'auth:navigate', 'auth:finish', 'auth:cancel',
+  'credential:describe', 'credential:submit', 'credential:cancel',
+] as const;
+export type IpcChannel = typeof IPC_CHANNELS[number];
+export type IpcHandlers = Partial<Record<IpcChannel, (...args: unknown[]) => unknown>>;
+interface Binding {
+  readonly pageUrl: string;
+  readonly handlers: IpcHandlers;
+}
+
+/** IPC 按具体本地窗口绑定；远程 WebContentsView 与子框架没有绑定。 */
+export class IpcRegistry {
+  private readonly bindings = new Map<number, Binding>();
+
+  constructor() {
+    for (const channel of IPC_CHANNELS) ipcMain.handle(channel, (event, ...args: unknown[]) => this.invoke(event, channel, args));
+  }
+
+  bind(window: BrowserWindow, pageUrl: string, handlers: IpcHandlers): void {
+    const id = window.webContents.id;
+    this.bindings.set(id, { pageUrl, handlers });
+    window.once('closed', () => this.bindings.delete(id));
+  }
+
+  dispose(): void {
+    for (const channel of IPC_CHANNELS) ipcMain.removeHandler(channel);
+    this.bindings.clear();
+  }
+
+  private async invoke(event: IpcMainInvokeEvent, channel: IpcChannel, args: unknown[]): Promise<unknown> {
+    try {
+      const binding = this.bindings.get(event.sender.id);
+      if (binding === undefined || event.senderFrame === null || !isTrustedIpcSender({
+        webContentsId: event.sender.id,
+        frameUrl: event.senderFrame.url,
+        isMainFrame: event.senderFrame === event.sender.mainFrame,
+      }, { webContentsId: event.sender.id, pageUrl: binding.pageUrl })) throw new ProtocolFault('forbidden');
+      const handler = binding.handlers[channel];
+      if (handler === undefined) throw new ProtocolFault('forbidden');
+      return { ok: true, value: await handler(...args) };
+    } catch (error) { return { ok: false, error: toPublicFailure(error) }; }
+  }
+}

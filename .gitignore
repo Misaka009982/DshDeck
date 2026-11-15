@@ -1,0 +1,19 @@
+# 依赖和构建产物不进入 Git。
+node_modules/
+dist/
+release/
+*.tsbuildinfo
+
+# 用户要求文档和测试只保留本机，不推送到仓库。
+docs/
+README.md
+tests/
+*.test.*
+*.spec.*
+
+# 本地日志、敏感配置和系统杂项。
+*.log
+.env
+.env.*
+.DS_Store
+Thumbs.db

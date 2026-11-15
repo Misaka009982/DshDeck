@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>浏览器登录</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="auth-page">
+  <header class="auth-toolbar">
+    <div class="auth-heading"><h1 id="auth-title">浏览器登录</h1><div><button id="cancel-auth" type="button">取消</button><button id="finish-auth" class="primary" type="button">已登录，验证连接</button></div></div>
+    <form id="auth-link-form" class="auth-link-form" autocomplete="off"><input id="auth-link" type="text" maxlength="8192" aria-label="临时认证链接" placeholder="可粘贴官方启动链接，仅在此窗口使用"><button type="submit">打开链接</button></form>
+    <p id="auth-note" class="muted small" role="status">认证网页的 dsh 业务流已禁用；页面可能提示断开。完成网页登录后点击“已登录，验证连接”。</p>
+  </header>
+  <script type="module" src="../../dist/src/renderer/auth.js"></script>
+</body>
+</html>

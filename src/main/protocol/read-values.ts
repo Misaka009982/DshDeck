@@ -107,7 +107,7 @@ export function parseSessionList(value: unknown): readonly SessionBrief[] {
       ...(item.parentSessionId === undefined ? {} : { parentSessionId: requireId(item.parentSessionId) }),
       ...(item.origin === undefined ? {} : { origin: 'subagent' as const }),
       ...(item.cwd === undefined ? {} : { cwd: text(item.cwd) }),
-      ...(item.formatStatus === undefined ? {} : { formatStatus: item.formatStatus }),
+      ...(item.formatStatus === undefined ? {} : { formatStatus: item.formatStatus } as const),
     };
   });
   if (new Set(items.map(item => item.sessionId)).size !== items.length) throw new ProtocolFault('protocol');

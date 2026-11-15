@@ -1,7 +1,7 @@
-import { BrowserWindow } from 'electron';
+import { BrowserWindow, clipboard, shell } from 'electron';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { ProtocolFault, requireId } from '../../shared/faults.js';
+import { ProtocolFault, requireId, requireKeys, requireRecord } from '../../shared/faults.js';
 import { normalizeServerInput } from '../../shared/server-config.js';
 import { parseContext } from '../../shared/domain.js';
 import { validateSampleInput } from '../../../tools/poc/protocol-probe.js';
@@ -13,10 +13,12 @@ import { IpcRegistry } from '../security/ipc-registry.js';
 import { FallbackView } from './fallback-view.js';
 import { localWebPreferences } from './security-options.js';
 import type { WindowAssets } from './window-assets.js';
+import type { DiagnosticLogger } from '../logging/diagnostic-logger.js';
 
 export interface MainWindowOptions {
   readonly workbench: WorkbenchService;
   readonly basicAuth: BasicAuthBroker;
+  readonly diagnostics: DiagnosticLogger;
   readonly choosePetPath: (kind: 'runtime' | 'resources', parent: BrowserWindow) => Promise<void>;
 }
 export async function openMainWindow(assets: WindowAssets, ipc: IpcRegistry, auth: AuthService, options?: MainWindowOptions): Promise<BrowserWindow> {
@@ -64,6 +66,24 @@ export async function openMainWindow(assets: WindowAssets, ipc: IpcRegistry, aut
       'app:close-fallback': () => fallback?.close(),
       'app:choose-pet-path': (kind: unknown) => { if (kind !== 'runtime' && kind !== 'resources') throw new ProtocolFault('protocol'); return options.choosePetPath(kind, window); },
       'app:set-demo': (value: unknown) => options.workbench.setDemo(requireBoolean(value)),
+      'app:open-logs': async () => {
+        await options.diagnostics.ensureDirectory();
+        const error = await shell.openPath(options.diagnostics.directory);
+        if (error !== '') throw new ProtocolFault('network');
+      },
+      'app:copy-diagnostics': async () => clipboard.writeText(await options.diagnostics.diagnosticReport()),
+      'app:renderer-failure': (input: unknown) => {
+        const failure = requireRecord(input); requireKeys(failure, ['kind'], ['line', 'column']);
+        if (failure.kind !== 'error' && failure.kind !== 'unhandled-rejection') throw new ProtocolFault('protocol');
+        for (const key of ['line', 'column'] as const) {
+          const value = failure[key];
+          if (value !== undefined && (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0 || value > 100000000)) throw new ProtocolFault('protocol');
+        }
+        options.diagnostics.record('error', 'renderer-failed', { reason: failure.kind,
+          ...(typeof failure.line === 'number' ? { rendererLine: failure.line } : {}),
+          ...(typeof failure.column === 'number' ? { rendererColumn: failure.column } : {}),
+        });
+      },
     }),
   });
   window.webContents.on('will-navigate', event => event.preventDefault());

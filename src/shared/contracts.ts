@@ -74,6 +74,11 @@ export interface ServerSnapshot {
 export type IpcResult<T> = { readonly ok: true; readonly value: T }
   | { readonly ok: false; readonly error: PublicFailure };
 
+export interface RendererFailure {
+  readonly kind: 'error' | 'unhandled-rejection';
+  readonly line?: number;
+  readonly column?: number;
+}
 export interface AppBridge {
   listServers(): Promise<IpcResult<readonly ServerSnapshot[]>>;
   addServer(input: ServerInput): Promise<IpcResult<ServerSnapshot>>;
@@ -99,6 +104,9 @@ export interface AppBridge {
   closeFallback(): Promise<IpcResult<void>>;
   choosePetPath(kind: 'runtime' | 'resources'): Promise<IpcResult<void>>;
   setDemo(enabled: boolean): Promise<IpcResult<void>>;
+  openLogs(): Promise<IpcResult<void>>;
+  copyDiagnostics(): Promise<IpcResult<void>>;
+  reportRendererFailure(input: RendererFailure): Promise<IpcResult<void>>;
   onOpenSettings(listener: () => void): () => void;
 }
 

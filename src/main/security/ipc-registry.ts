@@ -2,6 +2,7 @@ import { ipcMain } from 'electron';
 import type { BrowserWindow, IpcMainInvokeEvent } from 'electron';
 import { ProtocolFault, toPublicFailure } from '../../shared/faults.js';
 import { isTrustedIpcSender } from './ipc-policy.js';
+import type { DiagnosticLogger } from '../logging/diagnostic-logger.js';
 
 export const IPC_CHANNELS = [
   'app:list-servers', 'app:add-server', 'app:edit-server', 'app:connect-server',
@@ -9,11 +10,13 @@ export const IPC_CHANNELS = [
   'app:workbench', 'app:select-session', 'app:set-followed', 'app:set-manual-unread', 'app:set-draft',
   'app:send-text', 'app:stop-remote', 'app:answer', 'app:sync-now', 'app:load-older', 'app:confirm-read',
   'app:update-settings', 'app:open-fallback', 'app:close-fallback', 'app:choose-pet-path', 'app:set-demo',
+  'app:open-logs', 'app:copy-diagnostics', 'app:renderer-failure',
   'auth:describe', 'auth:navigate', 'auth:finish', 'auth:cancel',
   'credential:describe', 'credential:submit', 'credential:cancel',
 ] as const;
 export type IpcChannel = typeof IPC_CHANNELS[number];
 export type IpcHandlers = Partial<Record<IpcChannel, (...args: unknown[]) => unknown>>;
+const QUIET_CHANNELS = new Set<IpcChannel>(['app:workbench', 'app:list-servers', 'app:set-draft', 'app:confirm-read', 'app:renderer-failure', 'auth:describe', 'credential:describe']);
 interface Binding {
   readonly pageUrl: string;
   readonly handlers: IpcHandlers;
@@ -23,7 +26,7 @@ interface Binding {
 export class IpcRegistry {
   private readonly bindings = new Map<number, Binding>();
 
-  constructor() {
+  constructor(private readonly logger?: DiagnosticLogger) {
     for (const channel of IPC_CHANNELS) ipcMain.handle(channel, (event, ...args: unknown[]) => this.invoke(event, channel, args));
   }
 
@@ -48,7 +51,13 @@ export class IpcRegistry {
       }, { webContentsId: event.sender.id, pageUrl: binding.pageUrl })) throw new ProtocolFault('forbidden');
       const handler = binding.handlers[channel];
       if (handler === undefined) throw new ProtocolFault('forbidden');
-      return { ok: true, value: await handler(...args) };
-    } catch (error) { return { ok: false, error: toPublicFailure(error) }; }
+      const value = await handler(...args);
+      // 不记录参数、返回值和轮询成功；凭据与正文始终留在各自权限边界。
+      if (!QUIET_CHANNELS.has(channel)) this.logger?.record('info', 'ipc-complete', { operation: channel });
+      return { ok: true, value };
+    } catch (error) {
+      this.logger?.fault('ipc-failed', error, { operation: channel });
+      return { ok: false, error: toPublicFailure(error) };
+    }
   }
 }

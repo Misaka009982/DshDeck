@@ -15,6 +15,7 @@ import { DshWebAdapter } from '../protocol/dsh-web-adapter.js';
 import { MockAdapter } from '../protocol/mock-adapter.js';
 import { terminalFromEvent } from '../protocol/wire-values.js';
 import type { AdapterCallbacks, AdapterSubscription, WorkbenchAdapter } from '../protocol/adapter.js';
+import type { DiagnosticLogger } from '../logging/diagnostic-logger.js';
 
 interface Binding { readonly adapter: WorkbenchAdapter; readonly scope: ServerScope; readonly signal: AbortSignal }
 interface Foreground { readonly context: SessionContext; readonly controller: AbortController; subscription: AdapterSubscription | undefined }
@@ -58,7 +59,7 @@ export class WorkbenchService {
   private notifications: NotificationPort | undefined;
   private windowState: () => { visible: boolean; focused: boolean } = () => ({ visible: false, focused: false });
 
-  constructor(private readonly auth: AuthService, readonly preferences: Preferences) {
+  constructor(private readonly auth: AuthService, readonly preferences: Preferences, private readonly logger?: DiagnosticLogger) {
     this.cache = new SessionCache(64 * 1024 * 1024, () => this.changed());
     this.reconciler = new SessionReconciler(this.cache, context => this.acceptCacheFacts(context));
     this.scheduler = new SyncScheduler(async (context, signal) => {
@@ -373,6 +374,7 @@ export class WorkbenchService {
   private handleFault(scope: ServerScope, fault: ProtocolFault): void {
     const current = this.directory.scope(scope.serverId);
     if (current !== undefined && (current.authProfileId !== scope.authProfileId || current.generation !== scope.generation)) return;
+    if (fault.kind !== 'cancelled') this.logger?.fault('carrier-failed', fault, { serverId: scope.serverId, generation: scope.generation });
     this.pause(scope.serverId, ['auth-required', 'forbidden', 'login-response'].includes(fault.kind));
     this.changed();
   }
@@ -420,6 +422,7 @@ export class WorkbenchService {
   private bodyFailed(context: SessionContext, error: unknown): void {
     if (!this.scopeCurrent(context)) return;
     const failure = toPublicFailure(error);
+    if (failure.kind !== 'cancelled') this.logger?.fault('read-failed', error, { serverId: context.serverId, generation: context.generation });
     this.failures.set(this.pref(context), failure);
     if (['forbidden', 'auth-required', 'login-response'].includes(failure.kind)) {
       this.directory.removeSession(context, context.sessionId); this.state.revoke(context, context.sessionId);

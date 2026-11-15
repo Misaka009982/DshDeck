@@ -32,6 +32,9 @@ const bridge: AppBridge = {
   closeFallback: () => invoke('app:close-fallback'),
   choosePetPath: kind => invoke('app:choose-pet-path', kind),
   setDemo: enabled => invoke('app:set-demo', enabled),
+  openLogs: () => invoke('app:open-logs'),
+  copyDiagnostics: () => invoke('app:copy-diagnostics'),
+  reportRendererFailure: input => invoke('app:renderer-failure', input),
   onOpenSettings: listener => {
     const receive = (): void => listener();
     ipcRenderer.on('app:open-settings', receive);

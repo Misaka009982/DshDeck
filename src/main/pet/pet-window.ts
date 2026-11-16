@@ -187,12 +187,13 @@ export class PetWindow {
   }
   private moved(win: BrowserWindow): void {
     if (this.window !== win || win.isDestroyed() || this.config.settings.lockPosition) return;
-    const [x, y] = win.getPosition(); const expected = this.programmaticPosition;
+    const { x, y } = win.getBounds(); const expected = this.programmaticPosition;
     if (expected !== undefined && Date.now() < this.programmaticUntil && Math.abs(expected.x - x) <= 2 && Math.abs(expected.y - y) <= 2) return;
     this.programmaticPosition = undefined; clearTimeout(this.moveTimer);
     this.moveTimer = setTimeout(() => {
       this.moveTimer = undefined; if (this.window !== win || win.isDestroyed()) return;
-      const [x, y] = win.getPosition(); const geometry = petWindowGeometry({ ...this.config.settings, position: { x, y } }, screen.getDisplayMatching(win.getBounds()).workArea);
+      const bounds = win.getBounds(); const { x, y } = bounds;
+      const geometry = petWindowGeometry({ ...this.config.settings, position: { x, y } }, screen.getDisplayMatching(bounds).workArea);
       this.programmaticPosition = { x: geometry.bounds.x, y: geometry.bounds.y }; this.programmaticUntil = Date.now() + 1000;
       win.setBounds(geometry.bounds, false); win.webContents.setZoomFactor(geometry.scale);
       this.savePosition({ x: geometry.bounds.x, y: geometry.bounds.y });
@@ -200,7 +201,7 @@ export class PetWindow {
   }
   private capturePosition(): void {
     const win = this.window; if (win === undefined || win.isDestroyed()) return;
-    const [x, y] = win.getPosition(); this.savePosition({ x, y });
+    const { x, y } = win.getBounds(); this.savePosition({ x, y });
   }
   private savePosition(position: { x: number; y: number }): void {
     if (this.config.settings.position?.x === position.x && this.config.settings.position.y === position.y) return;

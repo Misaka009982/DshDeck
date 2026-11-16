@@ -13,6 +13,8 @@
     "dist/src/shared/**/*.js",
     "dist/tools/poc/**/*.js",
     "dist/renderer/workbench.js",
+    "dist/renderer/pet.js",
+    "dist/legal/build.json",
     "dist/src/renderer/auth.js",
     "dist/src/renderer/credential.js",
     "src/renderer/workbench.html",
@@ -20,6 +22,11 @@
     "src/renderer/credential.html",
     "src/renderer/styles.css",
     "src/renderer/workbench.css",
+    "src/renderer/pet.html",
+    "src/renderer/pet.css",
+    "LICENSE",
+    "NOTICE.txt",
+    "SOURCE.txt",
     "!docs/**",
     "!tests/**",
     "!dist/tests/**",
@@ -28,6 +35,11 @@
     "!**/*.log",
     "!**/.env",
     "!**/.env.*"
+  ],
+  "extraResources": [
+    { "from": "LICENSE", "to": "legal/LICENSE.txt" },
+    { "from": "NOTICE.txt", "to": "legal/NOTICE.txt" },
+    { "from": "SOURCE.txt", "to": "legal/SOURCE.txt" }
   ],
   "win": {
     "target": [

@@ -1,6 +1,8 @@
 import { useEffect, useRef } from 'react';
+import { preferenceKey } from '../../shared/domain.js';
 import type { ConversationView } from '../../shared/domain.js';
-import { canConfirmRead, messagesFromView, rawEventText } from './session-view-model.js';
+import { canConfirmRead, messagesFromView, rawEventText, reasoningSummary } from './session-view-model.js';
+import { WorkbenchIcon } from '../ui/WorkbenchIcon.js';
 import { SafeMarkdown } from './SafeMarkdown.js';
 import type { DisplayMessage } from './session-view-model.js';
 
@@ -10,11 +12,11 @@ export function MessageList({ view, mode, onRead, onOpenOriginal }: Props) {
   const end = useRef<HTMLDivElement>(null);
   const atEnd = useRef(true);
   const lastRead = useRef(-2);
-  const stableId = `${view.context.serverId}:${view.context.authProfileId}:${view.context.sessionId}`;
+  const stableId = preferenceKey(view.context.serverId, view.context.authProfileId, view.context.sessionId);
   const messages = messagesFromView(view).filter(message => mode !== 'output' || message.role === 'tool');
   useEffect(() => { atEnd.current = true; lastRead.current = -2; }, [stableId]);
   useEffect(() => {
-    if (atEnd.current) end.current?.scrollIntoView({ block: 'end' });
+    if (atEnd.current && scroll.current !== null) scroll.current.scrollTop = scroll.current.scrollHeight;
   }, [view.cursor, view.assistant.revision, stableId]);
   useEffect(() => {
     const target = end.current;
@@ -30,8 +32,8 @@ export function MessageList({ view, mode, onRead, onOpenOriginal }: Props) {
   }, [view, mode, onRead]);
   return <div className="message-scroll" ref={scroll}>
     <div className="message-column">
-      {mode === 'events' ? view.events.map(event => <details className="event-card" key={event.seq}><summary><span>#{event.seq}</span> {event.type}</summary><pre>{rawEventText(event)}</pre></details>) : messages.map(message => (
-        <article className={`message message-${message.role}`} key={message.id}>
+      {mode === 'events' ? view.events.map(event => <details className="event-card" key={`${stableId}:event:${event.seq}`}><summary><span>#{event.seq}</span> {event.type}</summary><pre>{rawEventText(event)}</pre></details>) : messages.map(message => (
+        <article className={`message message-${message.role}`} key={`${stableId}:${message.id}`}>
           {message.role === 'tool' || message.role === 'event' ? <details className="tool-output">
             <summary>{message.label || '输出'}{message.outcome !== undefined && <span className={`message-outcome outcome-${message.outcome}`}>{outcomeText(message.outcome)}</span>}{message.elapsedMs !== undefined && <span className="muted">{(message.elapsedMs / 1000).toFixed(1)}s</span>}</summary>
             {message.input !== undefined && message.input !== '' && <details className="tool-arguments"><summary>输入参数</summary><pre>{message.input}</pre></details>}
@@ -50,7 +52,7 @@ export function MessageList({ view, mode, onRead, onOpenOriginal }: Props) {
   </div>;
 }
 function MessageContent({ message, plain = false, onOpenOriginal }: { readonly message: DisplayMessage; readonly plain?: boolean; readonly onOpenOriginal?: (() => void) | undefined }) {
-  return <div className="message-content">{message.blocks.map((block, index) => block.kind === 'reasoning' ? <details className="reasoning" key={index} open={message.live}><summary>推理过程{message.live ? ' · 实时' : ''}</summary><SafeMarkdown text={block.text} /></details>
+  return <div className="message-content">{message.blocks.map((block, index) => block.kind === 'reasoning' ? <details className="reasoning" key={index}><summary><WorkbenchIcon name="chevron-down" size={12} /><span>推理过程{message.live ? ' · 实时' : ''}</span><span className="reasoning-preview">{reasoningSummary(block.text)}</span></summary><SafeMarkdown text={block.text} /></details>
     : block.kind === 'attachment' ? <div className="message-attachment" key={index}>{block.text}{onOpenOriginal !== undefined && <button type="button" onClick={onOpenOriginal}>原网页查看</button>}</div>
       : block.kind === 'tool-call' || block.kind === 'unknown' ? <details className="tool-output" key={index}><summary>{block.label ?? (block.kind === 'tool-call' ? '正在组织工具调用' : '未适配内容块')}</summary><pre>{block.text}</pre></details>
         : plain ? <pre className="tool-result-text" key={index}>{block.text}</pre> : <SafeMarkdown text={block.text} key={index} />)}</div>;

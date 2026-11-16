@@ -17,6 +17,8 @@ import { nativeRequest } from './native-policy.js';
 import { parseModelCatalog, parseModelSelection, parseCommands, parseCommandExecution, parseGoalRef, parseGoalSnapshot } from '../../shared/native-controls.js';
 import type { CommandDescriptor, CommandExecution, ModelCatalog, ModelSelection, SelectModelInput, GoalActionInput } from '../../shared/native-controls.js';
 import { parseProjectionBaseline, parseProjectionFrame, ProjectionBuffer } from './native-projections.js';
+import { parseJobFollow, parseJobRows } from '../../shared/jobs.js';
+import type { JobOutputCallbacks, JobRowsCallbacks } from './adapter.js';
 
 /** 固定公开协议适配器；目录/事件准入之后才接人工输入，不创建本地或远程 Agent。 */
 export class DshWebAdapter implements WorkbenchAdapter {
@@ -148,6 +150,26 @@ export class DshWebAdapter implements WorkbenchAdapter {
       if (controller.signal.aborted) throw new ProtocolFault('cancelled');
       throw error;
     } finally { this.answers.delete(input.interactionId); }
+  }
+  watchJobRows(sessionId: string, callbacks: JobRowsCallbacks, signal: AbortSignal): AdapterSubscription {
+    this.assertReady(); this.assertSession(sessionId); const combined = AbortSignal.any([this.signal, signal]);
+    if (combined.aborted) throw new ProtocolFault('cancelled');
+    const stream = this.requireMux().jobRows(sessionId, value => { if (!combined.aborted) callbacks.item(parseJobRows(value, sessionId)); }, fault => { if (!combined.aborted) callbacks.failed(fault); });
+    const cancel = (): void => stream.cancel(); combined.addEventListener('abort', cancel, { once: true });
+    if (combined.aborted) cancel();
+    return { cancel: () => { combined.removeEventListener('abort', cancel); cancel(); } };
+  }
+  followJob(sessionId: string, jobId: string, from: number | undefined, callbacks: JobOutputCallbacks, signal: AbortSignal): AdapterSubscription {
+    this.assertReady(); this.assertSession(sessionId); const combined = AbortSignal.any([this.signal, signal]);
+    if (combined.aborted) throw new ProtocolFault('cancelled');
+    let stream: AdapterSubscription | undefined;
+    stream = this.requireMux().jobOutput(sessionId, jobId, from, value => {
+      if (combined.aborted) return; const frame = parseJobFollow(value, sessionId, jobId); callbacks.item(frame);
+      if (frame.type === 'status') stream?.cancel();
+    }, fault => { if (!combined.aborted) callbacks.failed(fault); });
+    const cancel = (): void => stream?.cancel(); combined.addEventListener('abort', cancel, { once: true });
+    if (combined.aborted) cancel();
+    return { cancel: () => { combined.removeEventListener('abort', cancel); cancel(); } };
   }
   async modelCatalog(signal: AbortSignal, refresh = false): Promise<ModelCatalog> {
     this.assertReady();

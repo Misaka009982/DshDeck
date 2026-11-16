@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { SessionContext } from '../../shared/domain.js';
 import { currentModel } from '../../shared/native-controls.js';
 import type { CatalogModel, ModelCatalog, ModelSelection, NativeSnapshot } from '../../shared/native-controls.js';
@@ -10,7 +10,7 @@ export function ModelSelector({ context, native, store, disabled, open, setOpen 
   const [catalog, setCatalog] = useState<ModelCatalog | null>(null);
   const [loading, setLoading] = useState(false); const [selecting, setSelecting] = useState(false);
   const [query, setQuery] = useState(''); const [error, setError] = useState(''); const [notice, setNotice] = useState('');
-  const alive = useRef(true); const root = useRef<HTMLDivElement>(null);
+  const alive = useRef(true); const root = useRef<HTMLDivElement>(null); const search = useRef<HTMLInputElement>(null);
   const action = useRef<{ signature: string; id: string } | null>(null);
   const selected = currentModel(native?.values, catalog);
   const chosen = catalog?.groups.find(group => group.id === selected?.provider)?.models.find(model => model.id === selected?.model);
@@ -24,13 +24,24 @@ export function ModelSelector({ context, native, store, disabled, open, setOpen 
     }).finally(() => { if (alive.current) setLoading(false); });
   };
   useEffect(() => { if (!disabled && catalog === null) load(); }, [disabled]);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!open) return;
+    const element = root.current; const container = element?.closest<HTMLElement>('.composer-area');
+    const align = (): void => {
+      if (element === null || container === undefined || container === null) return;
+      const padding = Number.parseFloat(getComputedStyle(container).paddingLeft) || 0;
+      const space = Math.max(0, Math.floor(element.getBoundingClientRect().right - container.getBoundingClientRect().left - padding));
+      element.style.setProperty('--model-popover-space', `${space}px`);
+    };
+    // 弹窗先限定在输入区，再聚焦；不得让浏览器为搜索框滚动整块会话布局。
+    align(); search.current?.focus({ preventScroll: true });
+    const observer = new ResizeObserver(align);
+    if (element !== null) observer.observe(element); if (container !== undefined && container !== null) observer.observe(container);
     load();
     const close = (event: PointerEvent): void => { if (event.target instanceof Node && !root.current?.contains(event.target)) setOpen(false); };
     const escape = (event: KeyboardEvent): void => { if (event.key === 'Escape') setOpen(false); };
-    window.addEventListener('pointerdown', close); window.addEventListener('keydown', escape);
-    return () => { window.removeEventListener('pointerdown', close); window.removeEventListener('keydown', escape); };
+    window.addEventListener('pointerdown', close); window.addEventListener('keydown', escape); window.addEventListener('resize', align);
+    return () => { observer.disconnect(); window.removeEventListener('pointerdown', close); window.removeEventListener('keydown', escape); window.removeEventListener('resize', align); };
   }, [open]);
   const rows = useMemo(() => {
     const filter = query.trim().toLocaleLowerCase();
@@ -65,7 +76,7 @@ export function ModelSelector({ context, native, store, disabled, open, setOpen 
         value={selected.reasoningEffort ?? chosen.reasoning.defaultEffort ?? ''} onChange={event => choose({ provider: selected.provider, model: selected.model, ...(event.target.value === '' ? {} : { reasoningEffort: event.target.value }) })}>
         <option value="">提供方默认</option>{selected.reasoningEffort !== undefined && !chosen.reasoning.efforts.some(effort => effort.id === selected.reasoningEffort) && <option value={selected.reasoningEffort} disabled>已保存档位：{selected.reasoningEffort}</option>}{chosen.reasoning.efforts.map(effort => <option key={effort.id} value={effort.id}>{effort.name}</option>)}
       </select></label>}
-      <input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索模型或提供方" aria-label="搜索模型" autoFocus />
+      <input ref={search} value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索模型或提供方" aria-label="搜索模型" />
       {loading && catalog === null && <p className="muted">正在读取服务器模型目录…</p>}
       <div className="model-options" role="group" aria-label="服务器模型列表">{rows.map(row => <button type="button" aria-pressed={selected?.provider === row.provider && selected.model === row.model.id} key={JSON.stringify([row.provider, row.model.id])} className={selected?.provider === row.provider && selected.model === row.model.id ? 'is-current' : ''}
         disabled={selecting || disabled || !catalog?.routableProviders.includes(row.provider)} onClick={() => pick(row.provider, row.model)}>

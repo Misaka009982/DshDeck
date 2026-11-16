@@ -9,6 +9,7 @@ import { Composer } from './Composer.js';
 import { PendingInteractionPanel } from './PendingInteractionPanel.js';
 import { FilePanel } from './FilePanel.js';
 import { RecoveryNotice } from './RecoveryNotice.js';
+import { BackgroundJobPanel } from './BackgroundJobPanel.js';
 import { WorkbenchIcon } from '../ui/WorkbenchIcon.js';
 
 type PaneMode = 'conversation' | 'output' | 'events' | 'files';
@@ -65,6 +66,7 @@ export function ConversationPane({ snapshot, store, overlayOpen = false }: { rea
   const webStyle = { backgroundColor: `rgba(${web?.dark ? '25,25,25' : '250,250,250'},${alpha})` } as CSSProperties;
   return <main className="deck-conversation">
     <nav className="conversation-tabs" aria-label="会话视图">{(['conversation', 'output', 'events', 'files'] as const).map(tab => <button type="button" key={tab} disabled={view === null && !legacy} aria-pressed={mode === tab} className={mode === tab ? 'active' : ''} onClick={() => choose(tab)}><WorkbenchIcon name={tab === 'conversation' ? 'chat' : tab === 'output' ? 'terminal' : tab === 'events' ? 'events' : 'folder'} size={14} />{tab === 'conversation' ? '对话' : tab === 'output' ? '工具输出' : tab === 'events' ? '事件' : '文件夹'}</button>)}
+      {view !== null && !legacy && !(webReady && mode === 'conversation') && !server?.authenticationOpen && !['auth-required', 'denied', 'authenticating'].includes(server?.state ?? '') && <BackgroundJobPanel key={`${view.context.serverId}:${view.context.authProfileId}:${view.context.sessionId}`} view={view} store={store} available={ready && server?.generation === view.context.generation} overlayOpen={overlayOpen} />}
       <span className="cache-indicator" title={status}>{view === null && !legacy ? '等待选择会话' : status}{view?.syncedAt !== null && view?.syncedAt !== undefined && ` · ${new Date(view.syncedAt).toLocaleTimeString()}`}{view?.syncing ? ' · 缓存同步中' : ''}</span>
     </nav>
     {server?.recovery !== undefined && <RecoveryNotice recovery={server.recovery} retry={() => { void store.action(store.api.connectServer(server.config.id)); }} disconnect={() => { void store.action(store.api.disconnectServer(server.config.id)); }} />}

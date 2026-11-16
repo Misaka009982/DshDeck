@@ -10,18 +10,6 @@ export interface PetAsset {
   readonly spriteVersionNumber: 1 | 2;
   readonly states: Readonly<Record<'idle' | 'green' | 'yellow' | 'red' | 'blue', { row: number; frames: number }>>;
 }
-export async function validatePetRuntime(rootPath: string): Promise<{ executable: string; entry: string; root: string }> {
-  const root = await realpath(rootPath).catch(() => { throw new ProtocolFault('not-found'); });
-  const manifest = requireRecord(await readJson(join(root, 'package.json'), 64 * 1024));
-  if (manifest.name !== 'cli-manager-desktop-pet-e' || manifest.main !== 'dist/main.js') throw new ProtocolFault('unsupported');
-  const entry = await localFile(root, 'dist/main.js', 4 * 1024 * 1024);
-  let executable: string | undefined;
-  for (const path of ['node_modules/electron/dist/electron.exe', 'runtime/electron.exe']) {
-    try { executable = await localFile(root, path, 256 * 1024 * 1024); break; } catch { /* 只检查明确属于该 companion 的候选，不使用任意 PATH。 */ }
-  }
-  if (executable === undefined) throw new ProtocolFault('not-found');
-  return { executable, entry, root };
-}
 export async function validatePetAsset(rootPath: string): Promise<PetAsset> {
   const root = await realpath(rootPath).catch(() => { throw new ProtocolFault('not-found'); });
   const manifestPath = await localFile(root, 'pet.json', 64 * 1024);
@@ -35,9 +23,9 @@ export async function validatePetAsset(rootPath: string): Promise<PetAsset> {
   if (typeof value.id !== 'string' || value.id.length === 0 || value.id.length > 160 || typeof value.displayName !== 'string' || value.displayName.length === 0 || value.displayName.length > 160
     || typeof sprite !== 'string' || !sprite.toLowerCase().endsWith('.webp') || (version !== 1 && version !== 2)) throw new ProtocolFault('unsupported');
   const spritePath = await localFile(root, sprite, 20 * 1024 * 1024);
+  const dimensions = await webpDimensions(spritePath);
+  if (dimensions.width !== 1536 || dimensions.height !== (version === 1 ? 1872 : 2288)) throw new ProtocolFault('unsupported');
   if (native) {
-    const dimensions = await webpDimensions(spritePath);
-    if (dimensions.width !== 1536 || dimensions.height !== (version === 1 ? 1872 : 2288)) throw new ProtocolFault('unsupported');
     // Codex 原生精灵布局对应 idle/working/waiting/error/success；只传协议所需状态。
     return { id: value.id, displayName: value.displayName, spritePath, spriteVersionNumber: version, states: {
       idle: { row: 0, frames: 6 }, green: { row: 7, frames: 6 }, yellow: { row: 6, frames: 6 }, red: { row: 5, frames: 8 }, blue: { row: 8, frames: 6 },
@@ -47,8 +35,8 @@ export async function validatePetAsset(rootPath: string): Promise<PetAsset> {
   const checked = {} as Record<'idle' | 'green' | 'yellow' | 'red' | 'blue', { row: number; frames: number }>;
   for (const name of ['idle', 'green', 'yellow', 'red', 'blue'] as const) {
     const state = requireRecord(states[name]); requireKeys(state, ['row', 'frames']);
-    if (typeof state.row !== 'number' || !Number.isSafeInteger(state.row) || state.row < 0 || state.row > 1000
-      || typeof state.frames !== 'number' || !Number.isSafeInteger(state.frames) || state.frames < 1 || state.frames > 1000) throw new ProtocolFault('unsupported');
+    if (typeof state.row !== 'number' || !Number.isSafeInteger(state.row) || state.row < 0 || state.row >= (version === 1 ? 9 : 11)
+      || typeof state.frames !== 'number' || !Number.isSafeInteger(state.frames) || state.frames < 1 || state.frames > 8) throw new ProtocolFault('unsupported');
     checked[name] = { row: state.row, frames: state.frames };
   }
   return { id: value.id, displayName: value.displayName, spritePath, spriteVersionNumber: version, states: checked };

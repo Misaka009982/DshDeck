@@ -5,6 +5,8 @@ import type { WebViewport } from './session-web.js';
 import type { WorkbenchCommand } from './workbench-commands.js';
 import type { ModelCatalog, ModelSelection, SelectModelInput, GoalActionInput, CommandDescriptor, CommandExecution } from './native-controls.js';
 import type { FileDirectory, FilePathRead, FilePreview, FileReadScope, FileWorkspace } from './files.js';
+import type { JobPanelSnapshot, JobReadScope, JobViewRead } from './jobs.js';
+import type { PetDisplayPatch } from './pet-display.js';
 import type { NetworkCheckReport } from './network-check.js';
 
 export interface ServerInput {
@@ -118,6 +120,8 @@ export interface AppBridge {
   fileDirectory(input: FilePathRead): Promise<IpcResult<FileDirectory>>;
   filePreview(input: FilePathRead): Promise<IpcResult<FilePreview>>;
   releaseFiles(input: FileReadScope): Promise<IpcResult<void>>;
+  jobView(input: JobViewRead): Promise<IpcResult<JobPanelSnapshot | null>>;
+  releaseJobs(input: JobReadScope): Promise<IpcResult<void>>;
   checkNetwork(id: string): Promise<IpcResult<NetworkCheckReport>>;
   stopRemote(context: SessionContext): Promise<IpcResult<void>>;
   answer(input: AnswerInput): Promise<IpcResult<void>>;
@@ -128,7 +132,9 @@ export interface AppBridge {
   openFallback(serverId: string): Promise<IpcResult<void>>;
   openWholeServer(serverId: string): Promise<IpcResult<void>>;
   closeFallback(): Promise<IpcResult<void>>;
-  choosePetPath(kind: 'runtime' | 'resources'): Promise<IpcResult<void>>;
+  choosePetPath(kind: 'resources'): Promise<IpcResult<void>>;
+  updatePetDisplay(input: PetDisplayPatch): Promise<IpcResult<void>>;
+  openLicenses(): Promise<IpcResult<void>>;
   selectPet(id: string): Promise<IpcResult<void>>;
   rescanPets(): Promise<IpcResult<void>>;
   basicCredentialInfo(id: string): Promise<IpcResult<BasicCredentialInfo>>;

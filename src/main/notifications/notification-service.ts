@@ -10,7 +10,7 @@ interface NotificationHooks {
   readonly jump: (task: TaskProjection) => void;
   readonly petNotice: (notification: unknown) => void;
 }
-/** 一套提醒策略分发给系统与宠物；系统声音由 OS 负责，宠物声音固定关闭。 */
+/** 一套提醒策略分发给系统与宠物；宠物声音默认关闭，只由用户在本机设置主动开启。 */
 export class NotificationService {
   private readonly dedup = new NotificationDedup();
   private readonly notifications = new Set<Notification>();

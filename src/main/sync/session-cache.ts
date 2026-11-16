@@ -1,4 +1,4 @@
-import type { AssistantBaseline, AssistantFrame, FollowSnapshot, Freshness, HistoryPage, SessionContext, WireEvent } from '../../shared/domain.js';
+import type { AssistantBaseline, AssistantFrame, FollowSnapshot, Freshness, HistoryPage, ServerScope, SessionContext, WireEvent } from '../../shared/domain.js';
 import { preferenceKey } from '../../shared/domain.js';
 import { ProtocolFault, toPublicFailure } from '../../shared/faults.js';
 import type { PublicFailure } from '../../shared/faults.js';
@@ -40,43 +40,53 @@ interface Entry {
   bytes: number;
 }
 
-/** 有界内存缓存；认证代次和不可变 header 均是复用条件，不写对话磁盘档案。 */
+/** 有界内存缓存；旧代次只能展示，当前读取与写入仍要求新代次，持久历史另按不可变 header 校验。 */
 export class SessionCache {
   private readonly entries = new Map<string, Entry>();
+  private readonly scopes = new Map<string, ServerScope>();
   private readonly revoked = new Map<string, number>();
   private readonly revokedSessions = new Map<string, number>();
   private protectedKey: string | null = null;
   constructor(private readonly budget = 64 * 1024 * 1024, private readonly changed: () => void = () => {}, private readonly now: () => number = Date.now) {}
+  beginScope(scope: ServerScope): void {
+    const previous = this.scopes.get(scope.serverId);
+    if (previous !== undefined && (scope.generation < previous.generation || scope.generation === previous.generation && scope.authProfileId !== previous.authProfileId)) throw new ProtocolFault('cancelled');
+    this.scopes.set(scope.serverId, { ...scope }); this.markStale(scope.serverId);
+  }
   protect(context: SessionContext | null): void { this.protectedKey = context === null ? null : key(context); }
   get(context: SessionContext): CacheSnapshot | undefined {
     const entry = this.match(context);
-    if (entry === undefined) return undefined;
-    this.entries.delete(key(context)); this.entries.set(key(context), entry);
-    return {
-      context: { ...context }, header: { ...entry.header }, title: entry.title === null ? null : { ...entry.title }, native: entry.native, events: entry.events, assistant: entry.assistant,
-      cursor: entry.cursor, hasMore: entry.hasMore, hasGap: entry.hasGap, freshness: entry.freshness,
-      syncing: entry.syncing, syncedAt: entry.syncedAt, failure: entry.failure,
-    };
+    return entry === undefined ? undefined : this.snapshot(entry, context);
+  }
+  /** 仅供 UI 保留已读正文；照实返回来源代次，不能用于接流、动作或确认已读。 */
+  getForDisplay(context: SessionContext): CacheSnapshot | undefined {
+    const current = this.get(context); if (current !== undefined) return current;
+    const entry = this.entries.get(key(context)); const scope = this.scopes.get(context.serverId);
+    if (entry === undefined || entry.context.generation > context.generation
+      || scope !== undefined && (scope.authProfileId !== context.authProfileId || scope.generation < context.generation)) return undefined;
+    return { ...this.snapshot(entry, entry.context), freshness: 'stale', syncing: false, native: { ...entry.native, state: 'stale' } };
   }
   applySnapshot(context: SessionContext, snapshot: FollowSnapshot): void {
-    if ((this.revoked.get(context.serverId) ?? -1) >= context.generation || (this.revokedSessions.get(key(context)) ?? -1) >= context.generation) throw new ProtocolFault('cancelled');
+    if (!this.scopeMatches(context) || (this.revoked.get(context.serverId) ?? -1) >= context.generation || (this.revokedSessions.get(key(context)) ?? -1) >= context.generation) throw new ProtocolFault('cancelled');
     const previous = this.entries.get(key(context));
     if (previous !== undefined && previous.context.generation > context.generation) return;
-    const reusable = previous !== undefined && previous.context.generation === context.generation && previous.header.id === snapshot.header.id
+    const sameGeneration = previous?.context.generation === context.generation;
+    const reusable = previous !== undefined && previous.header.id === snapshot.header.id
       && previous.header.createdAt === snapshot.header.createdAt && previous.header.version === snapshot.header.version;
     const events = merge(reusable ? previous.events : [], snapshot.events);
     const cursor = Math.max(reusable ? previous.cursor : -1, snapshot.cursor);
-    const assistant = reusable && (snapshot.cursor < previous.cursor || snapshot.assistant.revision < previous.assistant.revision) ? previous.assistant : snapshot.assistant;
+    // assistant revision 和投影属于当前载体基线，跨代次只合并持久事件，不让旧瞬态盖住新状态。
+    const assistant = reusable && sameGeneration && (snapshot.cursor < previous.cursor || snapshot.assistant.revision < previous.assistant.revision) ? previous.assistant : snapshot.assistant;
     const first = events[0]?.seq ?? -1;
     const text = parseSessionTitle(snapshot.projections.title);
     const title = newerTitle(newerTitle(reusable ? previous.title : null, text === undefined ? null : { text, asOfSeq: snapshot.cursor }), titleFromEvents(events));
-    const native: NativeSnapshot = reusable && previous.native.asOfSeq >= snapshot.cursor ? previous.native
-      : { asOfSeq: snapshot.cursor, ...parseNativeValues(snapshot.projections), state: reusable && previous.native.state === 'live' ? 'live' : 'cached', failure: null };
+    const native: NativeSnapshot = reusable && sameGeneration && previous.native.asOfSeq >= snapshot.cursor ? previous.native
+      : { asOfSeq: snapshot.cursor, ...parseNativeValues(snapshot.projections), state: reusable && sameGeneration && previous.native.state === 'live' ? 'live' : 'cached', failure: null };
     const entry: Entry = {
       context: { ...context }, header: { ...snapshot.header }, title, native, events, cursor, assistant,
       hasMore: first > 0 || (snapshot.hasMore && (!reusable || previous.hasMore)), hasGap: hasGap(events, cursor),
-      freshness: 'fresh', syncing: previous?.syncing ?? false, syncedAt: this.now(), failure: null,
-      settlementSeq: reusable ? previous.settlementSeq : null, bytes: 0,
+      freshness: 'fresh', syncing: sameGeneration ? previous?.syncing ?? false : false, syncedAt: this.now(), failure: null,
+      settlementSeq: reusable && sameGeneration ? previous.settlementSeq : null, bytes: 0,
     };
     this.admit(context, entry);
   }
@@ -174,16 +184,32 @@ export class SessionCache {
     return null;
   }
   markStale(serverId: string): void { for (const entry of this.entries.values()) if (entry.context.serverId === serverId) { entry.freshness = 'stale'; entry.syncing = false; entry.native = { ...entry.native, state: 'stale' }; } this.changed(); }
-  remove(context: SessionContext): void { this.entries.delete(key(context)); this.revokedSessions.set(key(context), context.generation); this.changed(); }
+  remove(context: SessionContext): void {
+    if (!this.scopeMatches(context) || (this.entries.get(key(context))?.context.generation ?? -1) > context.generation) return;
+    this.entries.delete(key(context)); this.revokedSessions.set(key(context), context.generation); this.changed();
+  }
   revoke(serverId: string, generation?: number): void {
-    let through = generation ?? -1;
+    let through = Math.max(generation ?? -1, this.scopes.get(serverId)?.generation ?? -1);
     for (const [key, entry] of this.entries) if (entry.context.serverId === serverId) { through = Math.max(through, entry.context.generation); this.entries.delete(key); }
     this.revoked.set(serverId, Math.max(this.revoked.get(serverId) ?? -1, through)); this.changed();
   }
-  clear(): void { this.entries.clear(); this.revoked.clear(); this.revokedSessions.clear(); this.changed(); }
+  clear(): void { this.entries.clear(); this.scopes.clear(); this.revoked.clear(); this.revokedSessions.clear(); this.changed(); }
   bytes(): number { let total = 0; for (const entry of this.entries.values()) total += entry.bytes; return total; }
 
+  private snapshot(entry: Entry, context: SessionContext): CacheSnapshot {
+    this.entries.delete(key(context)); this.entries.set(key(context), entry);
+    return {
+      context: { ...context }, header: { ...entry.header }, title: entry.title === null ? null : { ...entry.title }, native: entry.native, events: entry.events, assistant: entry.assistant,
+      cursor: entry.cursor, hasMore: entry.hasMore, hasGap: entry.hasGap, freshness: entry.freshness,
+      syncing: entry.syncing, syncedAt: entry.syncedAt, failure: entry.failure,
+    };
+  }
+  private scopeMatches(context: ServerScope): boolean {
+    const scope = this.scopes.get(context.serverId);
+    return scope === undefined || scope.authProfileId === context.authProfileId && scope.generation === context.generation;
+  }
   private match(context: SessionContext): Entry | undefined {
+    if (!this.scopeMatches(context)) return undefined;
     const entry = this.entries.get(key(context));
     return entry?.context.generation === context.generation ? entry : undefined;
   }

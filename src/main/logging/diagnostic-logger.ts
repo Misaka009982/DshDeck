@@ -84,7 +84,7 @@ const RESPONSE_TYPES = new Set<ResponseCategory>(['json', 'multipart', 'html', '
 const ADDRESS_KINDS = new Set<AddressKind>(['loopback', 'tailnet-range', 'private-ip', 'public-ip', 'ipv6', 'hostname']);
 const ENDPOINTS = new Set(['workspace/follow', 'session/list', 'session/follow', 'session/events', 'session/state',
   'session/observeState', 'session/control', 'session/prompt', 'session/cancel', 'session/modelCatalog', 'session/projections', 'session/observeProjections', 'session/selectModel',
-  'commands/list', 'commands/execute', 'goals/create', 'goals/edit', 'goals/pause', 'goals/resume', 'goals/clear', 'dsh-file-share/status', 'dsh-file-share/list', 'dsh-file-share/preview', '$events', '$events/result']);
+  'commands/list', 'commands/execute', 'goals/create', 'goals/edit', 'goals/pause', 'goals/resume', 'goals/clear', 'dsh-file-share/status', 'dsh-file-share/list', 'dsh-file-share/preview', 'job/list', 'job/follow', '$events', '$events/result']);
 const STATES = new Set<ConnectionState>(['idle', 'authenticating', 'probing', 'readonly-ready', 'auth-required', 'denied', 'incompatible', 'failed', 'cancelled']);
 const FAULTS = new Set<string>(['auth-required', 'forbidden', 'not-found', 'login-response', 'protocol', 'unsupported', 'network',
   'tls', 'cancelled', 'budget', 'timeout', 'conflict', 'uncertain', 'local-state', 'unexpected']);
@@ -92,6 +92,7 @@ const OPERATIONS = new Set(['app:list-servers', 'app:add-server', 'app:edit-serv
   'app:authenticate-server', 'app:disconnect-server', 'app:run-sample', 'app:stop-sample', 'app:workbench', 'app:select-session',
   'app:set-followed', 'app:set-manual-unread', 'app:set-draft', 'app:send-text', 'app:stop-remote', 'app:answer', 'app:sync-now',
   'app:load-older', 'app:confirm-read', 'app:update-settings', 'app:open-fallback', 'app:close-fallback', 'app:choose-pet-path', 'app:select-pet', 'app:rescan-pets',
+  'app:update-pet-display', 'app:open-licenses', 'app:job-view', 'app:release-jobs', 'pet:ready', 'pet:mouse-interactive', 'pet:action',
   'app:set-demo', 'app:model-catalog', 'app:command-catalog', 'app:select-model', 'app:goal-action', 'app:execute-command', 'app:file-workspace', 'app:file-directory', 'app:file-preview', 'app:release-files', 'app:check-network', 'app:open-logs', 'app:copy-diagnostics', 'app:renderer-failure', 'app:basic-credential-info', 'app:edit-basic-credentials', 'app:forget-basic-credentials', 'auth:describe', 'auth:page-state', 'auth:navigate', 'auth:finish', 'auth:cancel',
   'credential:describe', 'credential:submit', 'credential:cancel', 'app:update-appearance', 'app:choose-background', 'app:clear-background', 'app:set-web-viewport', 'app:cache-web-layout', 'app:command-menu', 'app:toggle-web-sidebar', 'app:show-web-files', 'app:show-web-conversation', 'app:open-web-layouts', 'app:open-server-web']);
 const ERROR_NAMES = new Set(['Error', 'TypeError', 'SyntaxError', 'RangeError', 'AbortError', 'ProtocolFault', 'UnexpectedError']);

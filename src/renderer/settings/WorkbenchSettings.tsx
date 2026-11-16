@@ -25,20 +25,27 @@ export function WorkbenchSettingsDialog({ snapshot, store, open, close }: { read
       if (applying) return; setApplying(true);
       void store.action(store.api.updateAppearance({ backgroundEnabled: appearance.backgroundEnabled, sessionTransparency: appearance.sessionTransparency, crop: appearance.crop })).finally(() => setApplying(false));
     }}>{applying ? '应用中…' : '应用背景'}</button></div>
-    <section className="settings-section"><h3>宠物</h3><p className="muted small">只展示关注任务、提醒并点击跳回会话。不会在宠物中作答或批准，不下载或捆绑第三方图片。</p>
-      <div className="path-setting"><span>{snapshot.pet.runtimeRoot ?? '未选择本机宠物运行器'}</span><button type="button" onClick={() => { void store.action(store.api.choosePetPath('runtime')); }}>选择宠物运行器</button></div>
+    <section className="settings-section"><h3>宠物</h3><p className="muted small">本项目自带宠物窗口，无需另外的运行器。只展示关注会话、提醒并点击跳回；不会在宠物中作答或批准，不下载或捆绑第三方图片。</p>
       <div className="path-setting"><span>{snapshot.pet.resourceRoot ?? '未选择本机宠物库'}</span><button type="button" onClick={() => { void store.action(store.api.choosePetPath('resources')); }}>选择宠物库</button><button type="button" disabled={snapshot.pet.scanning || snapshot.pet.resourceRoot === null} onClick={() => { void store.action(store.api.rescanPets()); }}>{snapshot.pet.scanning ? '扫描中…' : '重新扫描'}</button></div>
       {(snapshot.pet.choices?.length ?? 0) > 0 && <fieldset className="pet-library"><legend>可选宠物 · 桌面只显示一只</legend>{snapshot.pet.choices?.map(pet => <label className={`pet-choice ${pet.available ? '' : 'is-unavailable'}`} key={pet.id}>
         <input type="radio" name="pet-selection" value={pet.id} checked={snapshot.pet.selectedPetId === pet.id} disabled={!pet.available || snapshot.pet.scanning} onChange={() => { void store.action(store.api.selectPet(pet.id)); }} />
         <span><strong>{pet.name}</strong><small>{pet.message}</small></span>
       </label>)}</fieldset>}
       {snapshot.pet.truncated && <p className="muted small" role="status">扫描达到安全上限；请缩小宠物库目录，当前结果不代表全部资源。</p>}
-      <label className="checkbox-setting"><input type="checkbox" checked={snapshot.settings.petEnabled} onChange={event => change({ ...snapshot.settings, petEnabled: event.target.checked })} />启用本机宠物</label>
+      <label>宠物大小 · {snapshot.pet.display.size}%<input type="range" min={50} max={200} step={5} value={snapshot.pet.display.size} onChange={event => { void store.action(store.api.updatePetDisplay({ size: Number(event.target.value) })); }} /></label>
+      <div className="pet-display-options">{([
+        ['alwaysOnTop', '窗口置顶'], ['lockPosition', '锁定位置'], ['showTaskArea', '显示关注任务灯与列表'], ['openOnHover', '悬浮展开任务'],
+        ['showStatus', '显示状态标签'], ['showCliLabel', '显示任务来源'], ['notificationsEnabled', '显示宠物提醒'], ['soundEnabled', '宠物声音（默认关闭）'],
+        ['autoHideFullscreen', '主窗口全屏时隐藏'],
+      ] as const).map(([key, label]) => <label className="checkbox-setting" key={key}><input type="checkbox" checked={snapshot.pet.display[key]} onChange={event => { void store.action(store.api.updatePetDisplay({ [key]: event.target.checked })); }} />{label}</label>)}</div>
+      <div className="dialog-actions"><button type="button" onClick={() => { void store.action(store.api.updatePetDisplay({ position: null })); }}>重置宠物位置</button></div>
+      <label className="checkbox-setting"><input type="checkbox" checked={snapshot.settings.petEnabled} onChange={event => change({ ...snapshot.settings, petEnabled: event.target.checked })} />启用内置宠物</label>
       <p className="muted small" role="status">{snapshot.pet.message}</p>
     </section>
     <section className="settings-section"><h3>演示与兼容</h3><label className="checkbox-setting"><input type="checkbox" checked={snapshot.demo} onChange={event => { void store.action(store.api.setDemo(event.target.checked)); }} />显示合成演示数据（不联网，不执行任务）</label>
       <p className="muted small">真实部署兼容、认证、流量和缓存时延仍需在全部实现后统一验证。</p>
     </section>
+    <section className="settings-section"><h3>许可与源码</h3><p className="muted small">DshDeck 按 AGPL-3.0-or-later 提供；内置宠物改编自 CLI-Manager/pet-e，原作者保留权利。本程序不提供担保，可按许可复制、修改和再分发；第三方宠物图片不随包提供。</p><button type="button" onClick={() => { void store.action(store.api.openLicenses()); }}>查看完整许可与对应源码</button></section>
     <footer className="dialog-actions"><button type="button" className="primary" onClick={close}>完成</button></footer>
   </dialog>;
 }

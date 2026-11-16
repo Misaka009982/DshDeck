@@ -14,6 +14,7 @@ import { validateSampleInput } from '../../../tools/poc/protocol-probe.js';
 import { parseAnswerInput, parseReadConfirmation, parseSendText, requireBoolean } from '../security/workbench-input.js';
 import { parseGoalActionInput, parseSelectModelInput } from '../security/native-input.js';
 import { parseFilePathRead, parseFileReadScope } from '../security/file-input.js';
+import { parseJobReadScope, parseJobViewRead } from '../security/job-input.js';
 import { AuthService } from '../auth/auth-service.js';
 import type { BasicAuthBroker } from '../auth/basic-auth-broker.js';
 import type { CredentialStore } from '../auth/credential-store.js';
@@ -24,6 +25,7 @@ import { SessionWebView } from './session-web-view.js';
 import type { BackgroundService } from '../appearance/background-service.js';
 import type { WebLayoutSnapshots } from '../browser/web-layout-snapshot.js';
 import { localWebPreferences } from './security-options.js';
+import { showLicenses } from '../legal/license-service.js';
 import type { WindowAssets } from './window-assets.js';
 import type { DiagnosticLogger } from '../logging/diagnostic-logger.js';
 
@@ -35,7 +37,7 @@ export interface MainWindowOptions {
   readonly background: BackgroundService;
   readonly layouts: WebLayoutSnapshots;
   readonly windowState: WindowStateStore;
-  readonly choosePetPath: (kind: 'runtime' | 'resources', parent: BrowserWindow) => Promise<void>;
+  readonly choosePetPath: (kind: 'resources', parent: BrowserWindow) => Promise<void>;
   readonly selectPet: (id: string) => Promise<void>;
   readonly rescanPets: () => Promise<void>;
 }
@@ -115,6 +117,8 @@ export async function openMainWindow(assets: WindowAssets, ipc: IpcRegistry, aut
       'app:file-directory': (input: unknown) => options.workbench.fileDirectory(parseFilePathRead(input, true)),
       'app:file-preview': (input: unknown) => options.workbench.filePreview(parseFilePathRead(input)),
       'app:release-files': (input: unknown) => options.workbench.releaseFiles(parseFileReadScope(input)),
+      'app:job-view': (input: unknown) => options.workbench.jobView(parseJobViewRead(input)),
+      'app:release-jobs': (input: unknown) => options.workbench.releaseJobs(parseJobReadScope(input)),
       'app:check-network': (id: unknown) => auth.checkNetwork(requireId(id)),
       'app:stop-remote': (context: unknown) => options.workbench.stop(parseContext(context)),
       'app:answer': (input: unknown) => options.workbench.answer(parseAnswerInput(input)),
@@ -152,7 +156,9 @@ export async function openMainWindow(assets: WindowAssets, ipc: IpcRegistry, aut
         const state = web?.status();
         return commandMenu(window, { webReady: state?.state === 'ready', webOpen: state !== undefined && state.state !== 'closed', hasServer: state?.serverId != null || options.workbench.selectedContext() !== null });
       },
-      'app:choose-pet-path': (kind: unknown) => { if (kind !== 'runtime' && kind !== 'resources') throw new ProtocolFault('protocol'); return options.choosePetPath(kind, window); },
+      'app:choose-pet-path': (kind: unknown) => { if (kind !== 'resources') throw new ProtocolFault('protocol'); return options.choosePetPath(kind, window); },
+      'app:update-pet-display': (input: unknown) => options.workbench.preferences.updatePetDisplay(input),
+      'app:open-licenses': () => showLicenses(window),
       'app:select-pet': (id: unknown) => options.selectPet(requireId(id)),
       'app:rescan-pets': () => options.rescanPets(),
       'app:basic-credential-info': (id: unknown) => {
@@ -216,7 +222,7 @@ function commandMenu(window: BrowserWindow, state: { webReady: boolean; webOpen:
     const item = (label: string, command: WorkbenchCommand, enabled = true): MenuItemConstructorOptions => ({ label, enabled, click: () => { picked = command; } });
     const menu = Menu.buildFromTemplate([
       item('设置', 'settings'), item('添加服务器', 'add-server'), { type: 'separator' },
-      item('日志', 'logs'), item('复制诊断', 'copy-diagnostics'), { type: 'separator' },
+      item('日志', 'logs'), item('复制诊断', 'copy-diagnostics'), item('许可与源码', 'licenses'), { type: 'separator' },
       item('缓存原网页（脱敏功能区）', 'cache-layout', state.webReady), item('打开功能区快照目录', 'layout-folder'),
       item('显示／隐藏原网页侧栏', 'toggle-web-sidebar', state.webReady), item('关闭兼容页', 'close-web', state.webOpen),
       { type: 'separator' }, item('断开服务器', 'disconnect', state.hasServer),

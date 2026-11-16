@@ -15,6 +15,8 @@ import { PetCompanion } from './pet/pet-companion.js';
 import { NotificationService } from './notifications/notification-service.js';
 import { preferenceKey } from '../shared/domain.js';
 import { ProtocolFault } from '../shared/faults.js';
+import { PET_APP_SCHEME, PET_ASSET_SCHEME } from '../shared/pet-view.js';
+import { showLicenses } from './legal/license-service.js';
 import { openMainWindow } from './windows/main-window.js';
 import { WindowStateStore } from './windows/window-state.js';
 import { openAuthWindow } from './windows/auth-window.js';
@@ -24,7 +26,11 @@ import { BackgroundService } from './appearance/background-service.js';
 import { WebLayoutSnapshots } from './browser/web-layout-snapshot.js';
 
 app.setName('DshDeck');
-protocol.registerSchemesAsPrivileged([{ scheme: 'dshdeck-image', privileges: { standard: true, secure: true } }]);
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'dshdeck-image', privileges: { standard: true, secure: true } },
+  { scheme: PET_APP_SCHEME, privileges: { standard: true, secure: true } },
+  { scheme: PET_ASSET_SCHEME, privileges: { standard: true, secure: true } },
+]);
 const diagnostics = new DiagnosticLogger(join(app.getPath('userData'), 'logs'), {
   appVersion: app.getVersion(), electronVersion: process.versions.electron ?? 'unknown',
   nodeVersion: process.versions.node, chromeVersion: process.versions.chrome ?? 'unknown',
@@ -114,15 +120,16 @@ void app.whenReady().then(async () => {
   const window = await openMainWindow(assets, registry, service, { workbench: deck, basicAuth, diagnostics, credentials: store, background: images, layouts, windowState: states,
     choosePetPath: async (kind, parent) => { if (pet === undefined) throw new ProtocolFault('unsupported'); await pet.choosePath(kind, parent); },
     selectPet: async id => { if (pet === undefined) throw new ProtocolFault('unsupported'); await pet.selectPet(id); },
-    rescanPets: async () => { if (pet === undefined) throw new ProtocolFault('unsupported'); await pet.rescan(); },
+    rescanPets: async () => { if (pet === undefined) throw new ProtocolFault('unsupported'); await pet.rescan(); await pet.setEnabled(deck.preferences.settings().petEnabled); },
   });
   const reveal = (): void => { if (!window.isDestroyed()) { window.show(); window.focus(); } };
   pet = new PetCompanion(deck.preferences, {
     changed: () => deck.refreshPresentation(),
     jump: task => { deck.validateScope(task.serverId, task.authProfileId, task.generation); deck.jump(task.serverId, task.sessionId); reveal(); },
-    clear: async task => { if (task.resultId === null) throw new ProtocolFault('cancelled'); await deck.clearResult(task.serverId, task.sessionId, task.resultId); },
     openSettings: () => { reveal(); if (!window.isDestroyed()) window.webContents.send('app:open-settings'); },
-  });
+    openLicenses: async () => { reveal(); await showLicenses(window); },
+  }, assets, registry, diagnostics);
+  window.on('enter-full-screen', () => pet?.fullscreen(true)); window.on('leave-full-screen', () => pet?.fullscreen(false));
   deck.attachPet(pet);
   deck.attachNotifications(new NotificationService({
     enabled: () => deck.preferences.settings().notifications,
@@ -156,6 +163,6 @@ app.on('before-quit', event => {
   workbench?.dispose(); auth?.dispose(); ipc?.dispose(); background?.dispose();
   if (auth !== undefined && credentials !== undefined) for (const server of auth.list()) credentials.clear(server.config.authProfileId);
   diagnostics.record('info', 'app-quitting');
-  void Promise.all([credentials?.flush(), windowState?.flush(), connectionIntents?.flush()]).then(() => diagnostics.flush())
+  void Promise.all([credentials?.flush(), windowState?.flush(), connectionIntents?.flush(), workbench?.preferences.flush()]).then(() => diagnostics.flush())
     .then(() => { finalLogFlushed = true; app.quit(); });
 });

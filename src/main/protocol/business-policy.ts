@@ -2,6 +2,7 @@ import { parseRemoteEventResult } from '@deepseek-ai/dsh-api-gateway/stream-prot
 import { ProtocolFault, requireId, requireKeys, requireRecord } from '../../shared/faults.js';
 import { assertReadRequest, READ_ENDPOINTS } from './read-policy.js';
 import { assertNativeRequest, NATIVE_ENDPOINTS } from './native-policy.js';
+import { assertJobReadRequest, JOB_READ_ENDPOINTS } from './job-policy.js';
 
 export interface BusinessRequest { readonly endpoint: string; readonly payload: { readonly args: Readonly<Record<string, unknown>> } }
 export const MAX_REQUEST_BYTES = 256 * 1024;
@@ -12,6 +13,7 @@ export function assertBusinessRequest(value: unknown): asserts value is Business
   requireKeys(request, ['endpoint', 'payload']);
   const endpoint = requireId(request.endpoint);
   if ((READ_ENDPOINTS as readonly string[]).includes(endpoint)) { assertReadRequest(value); return; }
+  if ((JOB_READ_ENDPOINTS as readonly string[]).includes(endpoint)) { assertJobReadRequest(value); return; }
   if ((NATIVE_ENDPOINTS as readonly string[]).includes(endpoint)) { assertNativeRequest(value); return; }
   const payload = requireRecord(request.payload);
   requireKeys(payload, ['args']);

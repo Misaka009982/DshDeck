@@ -72,9 +72,16 @@ export function messagesFromView(view: ConversationView): readonly DisplayMessag
   const attempt = view.assistant.activeAttempt;
   if (attempt !== null) {
     const blocks = streamBlocks(attempt.stream, false);
-    if (blocks.length > 0) messages.push(makeMessage(`attempt:${attempt.attemptId}`, attempt.startedAfterSeq, 'assistant', blocks, '实时输出', true));
+    if (blocks.length > 0) {
+      const live = view.status === 'live';
+      messages.push(makeMessage(`attempt:${attempt.attemptId}`, attempt.startedAfterSeq, 'assistant', blocks, live ? '实时输出' : '缓存输出 · 完成状态待确认', live));
+    }
   }
   return messages;
+}
+export function reasoningSummary(text: string): string {
+  const line = (text.trimStart().split(/\r?\n/u, 1)[0] ?? '').replaceAll('**', '').trim();
+  return line.length > 160 ? `${line.slice(0, 160)}…` : line;
 }
 export function rawEventText(event: WireEvent): string { return boundedJson({ type: event.type, seq: event.seq, time: event.time, data: event.data }); }
 export function canConfirmRead(view: ConversationView, visible: boolean, focused: boolean, atEnd: boolean): boolean {

@@ -11,6 +11,9 @@ on:
       - 'package-lock.json'
       - 'tsconfig*.json'
       - 'electron-builder.json'
+      - 'LICENSE'
+      - 'NOTICE.txt'
+      - 'SOURCE.txt'
       - '.github/workflows/build.yml'
   workflow_dispatch:
 
@@ -46,11 +49,23 @@ jobs:
       - name: 构建 Windows x64 安装包
         run: npm run package:win
 
-      - name: 上传 EXE 安装包
+      - name: 生成匹配提交的对应源码
+        run: |
+          $package = ConvertFrom-Json -InputObject ([System.IO.File]::ReadAllText('package.json'))
+          $archive = "release/DshDeck-Source-$($package.version)-$env:GITHUB_SHA.zip"
+          git archive --format=zip --output=$archive HEAD
+          if ($LASTEXITCODE -ne 0) { throw '对应源码 ZIP 生成失败' }
+          $installer = "release/DshDeck-Setup-$($package.version)-x64.exe"
+          if (!(Test-Path -LiteralPath $installer -PathType Leaf)) { throw '找不到 EXE 安装包' }
+          if (!(Test-Path -LiteralPath $archive -PathType Leaf)) { throw '找不到对应源码 ZIP' }
+
+      - name: 上传 EXE 与对应源码
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # 固定 v4 提交
         with:
           name: DshDeck-Windows-x64-${{ github.run_number }}-${{ github.run_attempt }}
-          path: release/DshDeck-Setup-*-x64.exe
+          path: |
+            release/DshDeck-Setup-*-x64.exe
+            release/DshDeck-Source-*.zip
           if-no-files-found: error
           retention-days: 14
           compression-level: 0

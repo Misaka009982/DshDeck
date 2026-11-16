@@ -1,0 +1,50 @@
+/* SPDX-License-Identifier: AGPL-3.0-or-later
+ * 移植自 CLI-Manager/pet-e/src/renderer/styles.css；2026-11-16 去除问答界面并加入本机深浅主题，原权利与许可见 NOTICE.txt / LICENSE。
+ */
+:root { color-scheme: dark; font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif; letter-spacing: 0; --green: #32d583; --yellow: #f5c451; --red: #f97066; --blue: #53b1fd; --panel: rgba(18,21,25,.96); --panel-strong: rgba(10,12,15,.98); --border: rgba(255,255,255,.16); --text: #f4f6f8; --muted: #aab2bc; }
+:root.theme-light { color-scheme: light; --panel: rgba(248,249,252,.97); --panel-strong: rgba(255,255,255,.98); --border: rgba(27,34,45,.17); --text: #1e2630; --muted: #667384; --green: #128b59; --yellow: #ad7800; --red: #d1423a; --blue: #2677ca; }
+* { box-sizing: border-box; } html, body { width: 380px; min-height: 540px; margin: 0; overflow: hidden; background: transparent; } body { color: var(--text); user-select: none; }
+button { font: inherit; color: inherit; letter-spacing: 0; } button:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; } button:disabled { opacity: .45; cursor: default; }
+#app { position: relative; width: 380px; height: 540px; padding: 8px; overflow: hidden; }
+.pet-shell { position: absolute; right: 8px; bottom: 8px; width: 232px; height: 260px; -webkit-app-region: drag; }
+.pet { position: absolute; right: 0; bottom: 0; width: 232px; height: 252px; border: 0; background: transparent; -webkit-app-region: drag; }
+.pet.missing { display: grid; place-items: center; width: 210px; height: 72px; padding: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); cursor: pointer; -webkit-app-region: no-drag; }
+.sprite-viewport { position: absolute; left: 20px; top: 20px; width: 192px; height: 208px; overflow: hidden; filter: drop-shadow(0 8px 8px rgba(0,0,0,.28)); }
+/* CSP 只允许受控样式表：用静态行／帧 class，而非内联样式。 */
+.sprite-sheet { position: absolute; left: 0; width: 1536px; max-width: none; image-rendering: pixelated; pointer-events: none; }
+.sprite-rows-9 { height: 1872px; } .sprite-rows-11 { height: 2288px; }
+.sprite-row-0 { top: 0; } .sprite-row-1 { top: -208px; } .sprite-row-2 { top: -416px; } .sprite-row-3 { top: -624px; } .sprite-row-4 { top: -832px; }
+.sprite-row-5 { top: -1040px; } .sprite-row-6 { top: -1248px; } .sprite-row-7 { top: -1456px; } .sprite-row-8 { top: -1664px; } .sprite-row-9 { top: -1872px; } .sprite-row-10 { top: -2080px; }
+.sprite-sheet.animated.sprite-frames-2 { animation: sprite-cycle-2 1400ms steps(2) infinite; } .sprite-sheet.animated.sprite-frames-3 { animation: sprite-cycle-3 1400ms steps(3) infinite; }
+.sprite-sheet.animated.sprite-frames-4 { animation: sprite-cycle-4 1400ms steps(4) infinite; } .sprite-sheet.animated.sprite-frames-5 { animation: sprite-cycle-5 1400ms steps(5) infinite; }
+.sprite-sheet.animated.sprite-frames-6 { animation: sprite-cycle-6 1560ms steps(6) infinite; } .sprite-sheet.animated.sprite-frames-7 { animation: sprite-cycle-7 1820ms steps(7) infinite; }
+.sprite-sheet.animated.sprite-frames-8 { animation: sprite-cycle-8 2080ms steps(8) infinite; }
+@keyframes sprite-cycle-2 { from { transform: translate3d(0,0,0); } to { transform: translate3d(-384px,0,0); } }
+@keyframes sprite-cycle-3 { from { transform: translate3d(0,0,0); } to { transform: translate3d(-576px,0,0); } }
+@keyframes sprite-cycle-4 { from { transform: translate3d(0,0,0); } to { transform: translate3d(-768px,0,0); } }
+@keyframes sprite-cycle-5 { from { transform: translate3d(0,0,0); } to { transform: translate3d(-960px,0,0); } }
+@keyframes sprite-cycle-6 { from { transform: translate3d(0,0,0); } to { transform: translate3d(-1152px,0,0); } }
+@keyframes sprite-cycle-7 { from { transform: translate3d(0,0,0); } to { transform: translate3d(-1344px,0,0); } }
+@keyframes sprite-cycle-8 { from { transform: translate3d(0,0,0); } to { transform: translate3d(-1536px,0,0); } }
+.pet-toolbar { position: absolute; top: 8px; right: 48px; z-index: 3; display: flex; gap: 5px; opacity: 0; transition: opacity 120ms ease; -webkit-app-region: no-drag; }
+.pet-shell:hover .pet-toolbar, .pet-shell:focus-within .pet-toolbar, .pet-shell.notification-active .pet-toolbar { opacity: 1; }
+.pet-toolbar button { width: 27px; height: 27px; padding: 0; border: 1px solid var(--border); border-radius: 5px; background: var(--panel-strong); color: var(--muted); cursor: pointer; font-size: 15px; line-height: 25px; }
+.pet-toolbar button:hover { border-color: currentColor; color: var(--text); }
+.lights { position: absolute; right: 0; top: 8px; display: grid; gap: 6px; width: 42px; -webkit-app-region: no-drag; }
+.light { display: grid; grid-template-columns: 16px 1fr; place-items: center; width: 42px; height: 30px; padding: 3px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel-strong); cursor: pointer; }
+.light:hover, .light.active { border-color: currentColor; } .light .dot { width: 11px; height: 11px; border-radius: 50%; background: currentColor; box-shadow: 0 0 8px currentColor; }
+.light .count { font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums; }.green { color: var(--green); }.yellow { color: var(--yellow); }.red { color: var(--red); }.blue { color: var(--blue); }
+.light.yellow { animation: waiting-pulse 1.6s ease-in-out infinite; } @keyframes waiting-pulse { 50% { filter: brightness(1.35); transform: scale(1.04); } }
+.status-label, .cli-label { position: absolute; right: 48px; max-width: 180px; overflow: hidden; border: 1px solid currentColor; border-radius: 5px; background: var(--panel-strong); text-align: right; text-overflow: ellipsis; white-space: nowrap; -webkit-app-region: no-drag; }
+.status-label { bottom: 34px; min-height: 22px; padding: 4px 7px; font-size: 10px; line-height: 13px; }.cli-label { bottom: 4px; min-height: 26px; padding: 5px 8px; font-size: 11px; line-height: 14px; }
+.pet-shell.notification-active .sprite-viewport { animation: pet-notification 700ms ease-in-out 2; } @keyframes pet-notification { 25% { transform: translateY(-4px) rotate(-2deg); } 75% { transform: translateY(0) rotate(2deg); } }
+.notification, .pet-error { position: absolute; right: 56px; top: 8px; z-index: 4; display: grid; gap: 3px; width: 250px; min-height: 52px; padding: 9px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); box-shadow: 0 8px 24px rgba(0,0,0,.3); -webkit-app-region: no-drag; }
+.notification strong { font-size: 12px; line-height: 16px; }.notification span { color: var(--muted); font-size: 11px; line-height: 15px; overflow-wrap: anywhere; }.pet-error { top: auto; bottom: 268px; color: var(--red); font-size: 11px; overflow-wrap: anywhere; }
+.task-panel { position: absolute; top: 8px; left: 8px; z-index: 6; width: 364px; max-height: 256px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); box-shadow: 0 10px 30px rgba(0,0,0,.38); -webkit-app-region: no-drag; }
+.task-panel > header { display: flex; align-items: center; justify-content: space-between; height: 34px; padding: 0 9px; border-bottom: 1px solid var(--border); }
+.task-panel header strong { font-size: 12px; }.task-panel header button { width: 26px; height: 26px; padding: 0; border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 18px; }
+.task-list { display: grid; gap: 5px; max-height: 214px; padding: 7px; overflow-y: auto; }.task-row { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 8px; min-height: 52px; padding: 7px; border-left: 3px solid currentColor; border-radius: 4px; background: rgba(128,128,128,.08); }
+.task-copy { display: grid; min-width: 0; gap: 2px; }.task-copy strong { overflow: hidden; color: var(--text); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }.task-copy > span { overflow-wrap: anywhere; color: var(--muted); font-size: 10px; line-height: 14px; }.task-copy .ended { color: currentColor; font-size: 10px; }
+.task-row button { min-width: 48px; min-height: 28px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 5px; background: rgba(128,128,128,.09); cursor: pointer; font-size: 11px; }.task-row button:disabled { cursor: default; }
+.empty { margin: 12px; color: var(--muted); font-size: 11px; text-align: center; } ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-thumb { border-radius: 3px; background: rgba(128,128,128,.3); }
+@media (prefers-reduced-motion: reduce) { .sprite-sheet.animated, .light.yellow, .pet-shell.notification-active .sprite-viewport { animation: none; }.pet-toolbar { transition: none; } }

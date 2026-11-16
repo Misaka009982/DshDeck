@@ -27,6 +27,8 @@ import { connectionIdentity, localConnectionDay } from '../storage/connection-in
 import type { ConnectionIntentStore } from '../storage/connection-intents.js';
 import { recoveryDelayMs } from '../../shared/recovery.js';
 import type { RecoveryView } from '../../shared/recovery.js';
+import type { JobPanelSnapshot, JobReadScope, JobViewRead } from '../../shared/jobs.js';
+import { BackgroundJobsReader } from '../jobs/background-jobs-reader.js';
 
 interface Binding { readonly adapter: WorkbenchAdapter; readonly scope: ServerScope; readonly signal: AbortSignal; readonly files?: FileShareReader }
 interface FileViewBinding { readonly context: SessionContext; readonly controller: AbortController }
@@ -49,6 +51,7 @@ export class WorkbenchService {
   readonly cache: SessionCache;
   private readonly reconciler: SessionReconciler;
   private readonly scheduler: SyncScheduler;
+  private readonly jobs: BackgroundJobsReader;
   private readonly bindings = new Map<string, Binding>();
   private readonly drafts = new Map<string, string>();
   private readonly pending = new Map<string, readonly PendingInteraction[]>();
@@ -92,6 +95,9 @@ export class WorkbenchService {
       try { await this.reconciler.synchronize(context, binding.adapter, AbortSignal.any([signal, binding.signal])); }
       catch (error) { this.bodyFailed(context, error); throw error; }
     });
+    this.jobs = new BackgroundJobsReader(context => this.jobBinding(context), (context, endpoint, error) => {
+      this.logger?.fault('read-failed', error, { serverId: context.serverId, generation: context.generation, endpoint });
+    });
     this.unsubscribed = auth.subscribe(() => this.authChanged());
   }
   async initialize(): Promise<void> { await this.preferences.load(); this.scheduler.setIntervalSeconds(this.preferences.settings().syncIntervalSeconds); this.scheduler.start(); this.changed(); }
@@ -133,7 +139,7 @@ export class WorkbenchService {
     if (context !== null && this.foreground === undefined) void this.startForeground(context).catch(error => this.bodyFailed(context, error));
     this.changed();
   }
-  clearSelection(): void { this.cancelFileViews(); this.clearForegroundRecovery(); this.stopForeground(); this.focus.clear(); this.lastSelection = null; this.cache.protect(null); this.changed(); }
+  clearSelection(): void { this.jobs.clearView(); this.cancelFileViews(); this.clearForegroundRecovery(); this.stopForeground(); this.focus.clear(); this.lastSelection = null; this.cache.protect(null); this.changed(); }
   attachPet(pet: PetPort): void { this.pet = pet; this.changed(); }
   attachNotifications(notifications: NotificationPort): void { this.notifications = notifications; this.changed(); }
   preferencesChanged(): void {
@@ -179,7 +185,7 @@ export class WorkbenchService {
     return {
       revision: this.revision, servers, tasks: this.tasks, counts: countTasks(this.tasks), selected,
       conversation: selected === null ? null : this.conversation(selected), settings: this.preferences.settings(),
-      pet: this.pet?.status() ?? { state: 'disabled', ...this.preferences.petPaths(), message: '未启用本机宠物。' }, demo: this.demo,
+      pet: this.pet?.status() ?? { state: 'disabled', ...this.preferences.petPaths(), display: this.preferences.petDisplay(), message: '未启用本机宠物。' }, demo: this.demo,
       ...(this.appearance === undefined ? {} : { appearance: this.appearance.view() }), ...(this.web === undefined ? {} : { web: this.web.status() }),
     };
   }
@@ -204,7 +210,7 @@ export class WorkbenchService {
     this.validateContext(context);
     const previous = this.selection();
     const selected = this.focus.select(context);
-    if (previous === null || !sameSession(previous, selected)) this.cancelFileViews();
+    if (previous === null || !sameSession(previous, selected)) { this.cancelFileViews(); this.jobs.clearView(); }
     this.lastSelection = selected;
     this.cache.protect(selected);
     this.clearForegroundRecovery(); this.stopForeground();
@@ -345,6 +351,8 @@ export class WorkbenchService {
       });
     } catch (error) { this.nativeFailed(input.context, error, 'commands/execute'); throw error; }
   }
+  jobView(input: JobViewRead): JobPanelSnapshot | null { return this.jobs.read(input); }
+  releaseJobs(input: JobReadScope): void { this.jobs.release(input); }
   fileWorkspace(input: FileReadScope): Promise<FileWorkspace> { return this.fileRead(input, (files, signal) => files.workspace(input.context.sessionId, signal), 'dsh-file-share/status'); }
   fileDirectory(input: FilePathRead): Promise<FileDirectory> { return this.fileRead(input, (files, signal) => files.directory(input.context.sessionId, input.path, signal), 'dsh-file-share/list'); }
   filePreview(input: FilePathRead): Promise<FilePreview> { return this.fileRead(input, (files, signal) => files.preview(input.context.sessionId, input.path, signal), 'dsh-file-share/preview'); }
@@ -428,7 +436,7 @@ export class WorkbenchService {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true; this.unsubscribed(); this.clearForegroundRecovery(); this.stopForeground();
-    this.scheduler.dispose(); this.reconciler.dispose(); this.pet?.dispose(); this.notifications?.dispose();
+    this.scheduler.dispose(); this.reconciler.dispose(); this.jobs.dispose(); this.pet?.dispose(); this.notifications?.dispose();
     for (const binding of this.bindings.values()) binding.adapter.dispose();
     for (const id of this.reconnects.keys()) this.clearReconnect(id);
     this.bindings.clear(); this.cache.clear(); this.drafts.clear(); this.pending.clear(); this.sends.clear(); this.nativeActions.dispose();
@@ -436,11 +444,11 @@ export class WorkbenchService {
   }
 
   private beginScope(scope: ServerScope): void {
-    this.cancelFileViews(scope.serverId);
+    this.jobs.invalidate(scope.serverId); this.cancelFileViews(scope.serverId);
     if (this.foregroundRecovery?.context.serverId === scope.serverId) this.clearForegroundRecovery();
     if (this.foreground?.context.serverId === scope.serverId) this.stopForeground();
     this.scheduler.pauseServer(scope.serverId); this.reconciler.cancelServer(scope.serverId);
-    this.directory.begin(scope); this.state.beginScope(scope); this.pending.delete(scope.serverId); this.cache.markStale(scope.serverId);
+    this.directory.begin(scope); this.state.beginScope(scope); this.pending.delete(scope.serverId); this.cache.beginScope(scope);
   }
   private callbacks(scope: ServerScope, failed: (fault: ProtocolFault) => void): AdapterCallbacks {
     return {
@@ -467,7 +475,7 @@ export class WorkbenchService {
       },
       removed: sessionId => {
         if (!this.scopeCurrent(scope)) return;
-        this.directory.removeSession(scope, sessionId); this.state.revoke(scope, sessionId);
+        this.directory.removeSession(scope, sessionId); this.state.revoke(scope, sessionId); this.jobs.removed(scope.serverId, sessionId);
         const context = { ...scope, workspaceId: null, sessionId };
         this.reconciler.cancel(context); this.cache.remove(context);
         this.failures.set(this.pref(context), toPublicFailure(new ProtocolFault('not-found')));
@@ -604,7 +612,7 @@ export class WorkbenchService {
     this.changed();
   }
   private pause(serverId: string, revoke: boolean): void {
-    this.cancelFileViews(serverId);
+    this.jobs.invalidate(serverId, revoke); this.cancelFileViews(serverId);
     if (this.foregroundRecovery?.context.serverId === serverId) this.clearForegroundRecovery();
     this.scheduler.pauseServer(serverId); this.reconciler.cancelServer(serverId);
     if (this.foreground?.context.serverId === serverId) this.stopForeground();
@@ -636,7 +644,7 @@ export class WorkbenchService {
           const resolved = this.focus.resolve(server.config.id, this.lastSelection.sessionId);
           if (resolved !== undefined && (this.foreground === undefined || !sameSession(this.foreground.context, resolved))) this.select(resolved);
         }
-      } else if (server.authenticationOpen || server.state === 'authenticating') { this.clearReconnect(server.config.id); this.pause(server.config.id, false); }
+      } else if (server.authenticationOpen || server.state === 'authenticating') { this.jobs.invalidate(server.config.id, true); this.clearReconnect(server.config.id); this.pause(server.config.id, false); }
       else if (['auth-required', 'denied'].includes(server.state)) {
         this.wantedConnections.delete(server.config.id); this.manualConnectionDays.delete(server.config.id); this.recoveryAttempts.delete(server.config.id); this.connected.delete(server.config.id);
         this.clearReconnect(server.config.id);
@@ -707,6 +715,12 @@ export class WorkbenchService {
       if (this.foreground !== undefined && sameSession(this.foreground.context, context)) this.stopForeground();
     } else this.cache.setFailure(context, error);
     this.changed();
+  }
+  private jobBinding(context: SessionContext): WorkbenchAdapter {
+    if (this.disposed) throw new ProtocolFault('cancelled');
+    this.assertSelected(context); const binding = this.binding(context);
+    if (binding.adapter.source !== 'live' || this.suspendedDetails.has(context.serverId)) throw new ProtocolFault('unsupported');
+    return binding.adapter;
   }
   /** 文件读取不参与问答或审批，允许当前原网页 owner 同时保有人工交互。 */
   private fileBinding(context: SessionContext): Binding & { readonly files: FileShareReader } {
@@ -782,7 +796,7 @@ export class WorkbenchService {
       && this.directory.scope(saved.serverId)?.authProfileId === saved.authProfileId
       && (this.directory.session(saved.serverId, saved.sessionId) === undefined || this.directory.archived(saved.serverId, saved.sessionId))) {
       // 离线保留缓存；已确认删除或归档则撤销选择，不留可点击的旧人工输入。
-      this.cancelFileViews(saved.serverId); this.clearForegroundRecovery(); this.stopForeground(); this.focus.clear(saved.serverId); this.lastSelection = null; this.cache.protect(null);
+      this.jobs.removed(saved.serverId, saved.sessionId); this.cancelFileViews(saved.serverId); this.clearForegroundRecovery(); this.stopForeground(); this.focus.clear(saved.serverId); this.lastSelection = null; this.cache.protect(null);
     }
     const selected = this.focus.current();
     if (selected !== null) this.lastSelection = selected;
@@ -809,7 +823,7 @@ export class WorkbenchService {
       pendingCount: facts?.pendingIds.length ?? 0, task: task?.color ?? null, freshness: facts?.freshness ?? 'stale' };
   }
   private conversation(context: SessionContext): ConversationView {
-    const cachedEntry = this.cache.get(context);
+    const cachedEntry = this.cache.getForDisplay(context);
     const server = this.auth.list().find(server => server.config.id === context.serverId);
     const locked = server !== undefined && (server.authenticationOpen || server.state === 'authenticating' || server.state === 'auth-required' || server.state === 'denied'
       || server.config.authProfileId !== context.authProfileId);
@@ -823,7 +837,7 @@ export class WorkbenchService {
     const last = ledgers[ledgers.length - 1]?.[1];
     return {
       context, title: this.row(context.serverId, context.authProfileId, context.sessionId)?.title ?? context.sessionId,
-      status: cached === undefined ? failure === null ? 'loading' : 'error' : cached.hasGap ? 'gap' : !connected || cached.freshness === 'stale' ? 'stale' : this.foreground !== undefined && sameSession(this.foreground.context, context) ? 'live' : 'cached',
+      status: cached === undefined ? failure === null ? 'loading' : 'error' : !connected || cached.freshness === 'stale' ? 'stale' : cached.hasGap ? 'gap' : this.foreground !== undefined && sameSession(this.foreground.context, context) ? 'live' : 'cached',
       events: cached?.events ?? [], assistant: cached?.assistant ?? { revision: 0, activeAttempt: null }, cursor: cached?.cursor ?? -1,
       hasMore: cached?.hasMore ?? false, hasGap: cached?.hasGap ?? false, syncedAt: cached?.syncedAt ?? null,
       syncing: cached?.syncing ?? (cached === undefined && failure === null), draft: this.drafts.get(this.pref(context)) ?? '', failure,

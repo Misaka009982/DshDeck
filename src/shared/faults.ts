@@ -49,7 +49,7 @@ export function toPublicFailure(error: unknown): PublicFailure {
 
 export function remoteFault(code: string): ProtocolFault {
   if (code === 'remote-access/denied') return new ProtocolFault('forbidden');
-  if (code === 'session/not-found' || code === 'workspace/not-found') return new ProtocolFault('not-found');
+  if (code === 'session/not-found' || code === 'workspace/not-found' || code === 'job/not-found') return new ProtocolFault('not-found');
   if (code === 'gateway/cancelled') return new ProtocolFault('cancelled');
   if (['gateway/method-unavailable', 'gateway/service-unavailable', 'gateway/definition-unavailable', 'gateway/lookup-not-found'].includes(code)) return new ProtocolFault('unsupported');
   if (code === 'GOAL_STALE_REVISION' || code === 'GOAL_ALREADY_EXISTS' || code === 'GOAL_INVALID_TRANSITION'

@@ -1,6 +1,8 @@
 import type { SessionPreference, WorkbenchSettings } from '../../shared/domain.js';
 import type { AppearanceSettings } from '../../shared/appearance.js';
 import { DEFAULT_APPEARANCE, parseAppearance, parseAppearancePatch } from '../../shared/appearance.js';
+import type { PetDisplaySettings } from '../../shared/pet-display.js';
+import { DEFAULT_PET_DISPLAY, parsePetDisplay, parsePetDisplayPatch } from '../../shared/pet-display.js';
 import { ProtocolFault, requireId, requireKeys, requireRecord } from '../../shared/faults.js';
 import { readJson, writeJson } from './json-file.js';
 
@@ -12,17 +14,17 @@ interface PreferenceData {
   readonly version: 1;
   readonly settings: WorkbenchSettings;
   readonly sessions: Readonly<Record<string, SessionPreference>>;
-  readonly petRuntimeRoot: string | null;
   readonly petResourceRoot: string | null;
   readonly petSelectionId: string | null;
+  readonly petDisplay: PetDisplaySettings;
   readonly appearance: AppearanceSettings;
   readonly backgroundPath: string | null;
 }
 
 /** 只保存关注、阅读水位与界面偏好；草稿、正文和认证材料不写磁盘。 */
 export class Preferences {
-  private data: PreferenceData = { version: 1, settings: { ...DEFAULT_SETTINGS }, sessions: {}, petRuntimeRoot: null, petResourceRoot: null, petSelectionId: null,
-    appearance: parseAppearance(DEFAULT_APPEARANCE), backgroundPath: null };
+  private data: PreferenceData = { version: 1, settings: { ...DEFAULT_SETTINGS }, sessions: {}, petResourceRoot: null, petSelectionId: null,
+    petDisplay: parsePetDisplay(DEFAULT_PET_DISPLAY), appearance: parseAppearance(DEFAULT_APPEARANCE), backgroundPath: null };
   private writing: Promise<void> = Promise.resolve();
   constructor(private readonly path: string, private readonly onChange: () => void = () => {},
     private readonly persist: (path: string, value: unknown, maxBytes: number) => Promise<void> = writeJson) {}
@@ -30,7 +32,8 @@ export class Preferences {
     const value = await readJson(this.path, 2 * 1024 * 1024);
     if (value === undefined) return;
     const data = requireRecord(value);
-    requireKeys(data, ['version', 'settings', 'sessions', 'petRuntimeRoot', 'petResourceRoot'], ['petSelectionId', 'appearance', 'backgroundPath']);
+    // 旧运行器字段仅兼容接收，不保存或要求该路径；宠物改由本应用承载。
+    requireKeys(data, ['version', 'settings', 'sessions', 'petResourceRoot'], ['petRuntimeRoot', 'petSelectionId', 'petDisplay', 'appearance', 'backgroundPath']);
     if (data.version !== 1) throw new ProtocolFault('unsupported');
     const sessions = requireRecord(data.sessions);
     if (Object.keys(sessions).length > 10000) throw new ProtocolFault('budget');
@@ -41,8 +44,9 @@ export class Preferences {
     }
     this.data = {
       version: 1, settings: parseSettings(data.settings), sessions: checked,
-      petRuntimeRoot: parseLocalPath(data.petRuntimeRoot), petResourceRoot: parseLocalPath(data.petResourceRoot),
+      petResourceRoot: parseLocalPath(data.petResourceRoot),
       petSelectionId: data.petSelectionId === undefined || data.petSelectionId === null ? null : requireId(data.petSelectionId),
+      petDisplay: parsePetDisplay(data.petDisplay ?? DEFAULT_PET_DISPLAY),
       appearance: parseAppearance(data.appearance ?? DEFAULT_APPEARANCE), backgroundPath: data.backgroundPath === undefined ? null : parseLocalPath(data.backgroundPath),
     };
   }
@@ -60,7 +64,15 @@ export class Preferences {
   }
   session(key: string): SessionPreference { return { ...(this.data.sessions[key] ?? DEFAULT_SESSION) }; }
   hasSession(key: string): boolean { return Object.hasOwn(this.data.sessions, key); }
-  petPaths(): { runtimeRoot: string | null; resourceRoot: string | null } { return { runtimeRoot: this.data.petRuntimeRoot, resourceRoot: this.data.petResourceRoot }; }
+  petPaths(): { resourceRoot: string | null } { return { resourceRoot: this.data.petResourceRoot }; }
+  petDisplay(): PetDisplaySettings { return parsePetDisplay(this.data.petDisplay); }
+  updatePetDisplay(value: unknown): Promise<void> {
+    const patch = parsePetDisplayPatch(value);
+    return this.mutate(data => {
+      const display = parsePetDisplay({ ...data.petDisplay, ...patch });
+      return JSON.stringify(display) === JSON.stringify(data.petDisplay) ? data : { ...data, petDisplay: display };
+    });
+  }
   petSelection(): string | null { return this.data.petSelectionId; }
   setPetSelection(value: string | null): Promise<void> { const id = value === null ? null : requireId(value); return this.mutate(data => ({ ...data, petSelectionId: id })); }
   updateSettings(value: unknown, appearanceValue?: unknown): Promise<void> {
@@ -81,12 +93,12 @@ export class Preferences {
       ...data, sessions: { ...data.sessions, [key]: { ...(data.sessions[key] ?? DEFAULT_SESSION), readSeq: cursor } },
     }));
   }
-  setPetPaths(runtimeRoot: string | null, resourceRoot: string | null): Promise<void> {
-    const runtime = parseLocalPath(runtimeRoot);
+  setPetLibrary(resourceRoot: string | null): Promise<void> {
     const resource = parseLocalPath(resourceRoot);
-    return this.mutate(data => ({ ...data, petRuntimeRoot: runtime, petResourceRoot: resource,
+    return this.mutate(data => ({ ...data, petResourceRoot: resource,
       petSelectionId: resource === data.petResourceRoot ? data.petSelectionId : null }));
   }
+  flush(): Promise<void> { return this.writing; }
   private mutate(apply: (data: PreferenceData) => PreferenceData): Promise<void> {
     const task = this.writing.then(async () => {
       const next = apply(this.data);

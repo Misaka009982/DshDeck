@@ -1,0 +1,17 @@
+DshDeck 许可与来源声明
+
+Copyright (C) 2026 DshDeck contributors.
+本项目整体按 GNU Affero General Public License version 3 或更新版本（AGPL-3.0-or-later）提供；完整原文见 LICENSE（Windows 安装目录的可打开副本为 legal/LICENSE.txt）。允许在该许可条件下复制、修改与再分发。本程序不提供担保，具体条款见 LICENSE 第15和16节。
+
+内置宠物来源
+宠物窗口、沙箱 preload、WebP 精灵动画与任务展示改编自 CLI-Manager 项目的 pet-e 目录，原代码随 CLI-Manager 按 AGPL-3.0-or-later 提供。原作者与贡献者保留其权利；DshDeck 不将此部分宣称为独立原创。
+移植日期：2026-11-16。改动包括：使用 DshDeck 的 Electron 与单一内置窗口、受限 IPC 和本机偏好；不再启动原 companion；只显示关注会话并跳回，不开放宠物内问答或审批。
+
+宠物图片与品牌
+不复制或再分发 Clawd、Calico、Cloudling、Codex 或其他第三方宠物 artwork。图片仅从用户主动选择、通过边界校验的本机宠物包读取；程序许可证不授予第三方图片、商标或品牌素材的权利。
+
+其他依赖
+Electron/Chromium、React、ws、DeepSeek Harness 公开包及构建工具保持其各自许可与版权声明。本文件不替换或取消随依赖提供的 LICENSE、NOTICE 或其他必须保留的材料。界面参考 dsh-desktop/Harness 不迁移其认证权限或品牌素材。
+
+对应源码与构建
+源码地址及如何修改、生成和安装修改版本见 SOURCE.txt。官方 GitHub 构建同时提供匹配该提交的源码 ZIP，不要求秘密密钥或特别账号以解包源码。许可证与对应源码材料不得当作普通文档排除。

@@ -3,9 +3,16 @@ import type { ProtocolFault } from '../../shared/faults.js';
 import { ReadOnlyMux } from './read-only-mux.js';
 import type { ReadSubscription } from './read-only-mux.js';
 import { nativeRequest } from './native-policy.js';
+import { jobReadRequest } from './job-policy.js';
 
 /** 共享同一物理 WS；仅工作台显式开放事件接管，PoC 保持原只读类。 */
 export class RemoteMux extends ReadOnlyMux {
+  jobRows(sessionId: string, item: (value: unknown) => void, failed: (fault: ProtocolFault) => void): ReadSubscription {
+    return this.subscribeTrusted(jobReadRequest('job/list', sessionId), 'state', item, failed);
+  }
+  jobOutput(sessionId: string, jobId: string, from: number | undefined, item: (value: unknown) => void, failed: (fault: ProtocolFault) => void): ReadSubscription {
+    return this.subscribeTrusted(jobReadRequest('job/follow', sessionId, jobId, from), 'detail', item, failed);
+  }
   projections(sessionId: string, item: (value: unknown) => void, failed: (fault: ProtocolFault) => void): ReadSubscription {
     return this.subscribeTrusted(nativeRequest('session/observeProjections', { request: { sessionId } }), 'detail', item, failed);
   }

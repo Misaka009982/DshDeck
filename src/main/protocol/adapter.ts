@@ -5,6 +5,7 @@ import type { DirectorySession } from '../state/directory-store.js';
 import type { WorkspaceReadFrame } from './read-values.js';
 import type { NativeFrame, ModelCatalog, ModelSelection, SelectModelInput, GoalActionInput, CommandDescriptor, CommandExecution } from '../../shared/native-controls.js';
 import type { WebInteractionOwner } from './interaction-ownership.js';
+import type { JobRowsFrame, JobFollowFrame } from '../../shared/jobs.js';
 
 export interface AdapterCallbacks {
   readonly workspaces: (frame: WorkspaceReadFrame) => void;
@@ -25,6 +26,8 @@ export interface FollowCallbacks {
   readonly failed: (fault: ProtocolFault) => void;
 }
 export interface AdapterSubscription { cancel(): void }
+export interface JobRowsCallbacks { readonly item: (frame: JobRowsFrame) => void; readonly failed: (fault: ProtocolFault) => void }
+export interface JobOutputCallbacks { readonly item: (frame: JobFollowFrame) => void; readonly failed: (fault: ProtocolFault) => void }
 export interface WorkbenchAdapter {
   readonly scope: ServerScope;
   readonly source: 'live' | 'synthetic';
@@ -35,6 +38,8 @@ export interface WorkbenchAdapter {
   send(input: SendTextInput, signal: AbortSignal): Promise<void>;
   stop(sessionId: string, signal: AbortSignal): Promise<void>;
   answer(input: AnswerInput, signal: AbortSignal): Promise<void>;
+  watchJobRows?(sessionId: string, callbacks: JobRowsCallbacks, signal: AbortSignal): AdapterSubscription;
+  followJob?(sessionId: string, jobId: string, from: number | undefined, callbacks: JobOutputCallbacks, signal: AbortSignal): AdapterSubscription;
   modelCatalog?(signal: AbortSignal, refresh?: boolean): Promise<ModelCatalog>;
   commands?(sessionId: string, signal: AbortSignal, refresh?: boolean): Promise<readonly CommandDescriptor[]>;
   selectModel?(input: SelectModelInput, signal: AbortSignal): Promise<ModelSelection>;

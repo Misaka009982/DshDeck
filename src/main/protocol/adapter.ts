@@ -3,6 +3,7 @@ import type { ProbeSampleInput, ProbeSampleResult } from '../../shared/contracts
 import type { ProtocolFault } from '../../shared/faults.js';
 import type { DirectorySession } from '../state/directory-store.js';
 import type { WorkspaceReadFrame } from './read-values.js';
+import type { NativeFrame, ModelCatalog, ModelSelection, SelectModelInput, GoalActionInput, CommandDescriptor, CommandExecution } from '../../shared/native-controls.js';
 import type { WebInteractionOwner } from './interaction-ownership.js';
 
 export interface AdapterCallbacks {
@@ -19,6 +20,8 @@ export interface FollowCallbacks {
   readonly snapshot: (snapshot: FollowSnapshot) => void;
   readonly event: (event: WireEvent) => void;
   readonly assistant: (frame: AssistantFrame) => void;
+  readonly projections?: (frame: NativeFrame) => void;
+  readonly projectionsFailed?: (fault: ProtocolFault) => void;
   readonly failed: (fault: ProtocolFault) => void;
 }
 export interface AdapterSubscription { cancel(): void }
@@ -32,6 +35,11 @@ export interface WorkbenchAdapter {
   send(input: SendTextInput, signal: AbortSignal): Promise<void>;
   stop(sessionId: string, signal: AbortSignal): Promise<void>;
   answer(input: AnswerInput, signal: AbortSignal): Promise<void>;
+  modelCatalog?(signal: AbortSignal, refresh?: boolean): Promise<ModelCatalog>;
+  commands?(sessionId: string, signal: AbortSignal, refresh?: boolean): Promise<readonly CommandDescriptor[]>;
+  selectModel?(input: SelectModelInput, signal: AbortSignal): Promise<ModelSelection>;
+  goalAction?(input: GoalActionInput, signal: AbortSignal): Promise<void>;
+  executeCommand?(input: SendTextInput, signal: AbortSignal): Promise<CommandExecution>;
   sample(input: ProbeSampleInput): Promise<ProbeSampleResult>;
   stopSample(): void;
   setWebOwner?(owner: WebInteractionOwner | null): void;

@@ -8,6 +8,7 @@ function invoke<T>(channel: string, ...args: unknown[]): Promise<IpcResult<T>> {
 }
 const bridge: AuthBridge = {
   describe: () => invoke('auth:describe'),
+  pageState: () => invoke('auth:page-state'),
   navigate: url => invoke('auth:navigate', url),
   finish: () => invoke('auth:finish'),
   cancel: () => invoke('auth:cancel'),

@@ -43,7 +43,7 @@ export function networkErrorCode(error: unknown): NetworkCode | undefined {
 /** 已知拒绝或证书错误不得被窗口结束标记掩盖。 */
 export function isNavigationAborted(error: unknown, ended: boolean): boolean {
   const code = networkErrorCode(error);
-  if (code === 'ERR_ABORTED' || code === 'ABORT_ERR') return true;
+  if (code === 'ERR_ABORTED' || code === 'ABORT_ERR' || ended && code === 'ERR_FAILED') return true;
   if (!ended || code !== undefined || !isRecord(error)) return false;
   try {
     const message = error.message;

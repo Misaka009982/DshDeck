@@ -1,4 +1,4 @@
-import { BrowserWindow, clipboard, dialog, Menu, shell } from 'electron';
+import { BrowserWindow, clipboard, dialog, Menu, screen, shell } from 'electron';
 import type { MenuItemConstructorOptions } from 'electron';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -7,9 +7,12 @@ import { normalizeServerInput } from '../../shared/server-config.js';
 import { parseContext } from '../../shared/domain.js';
 import { parseAppearance, parseAppearancePatch } from '../../shared/appearance.js';
 import { parseWebViewport } from '../../shared/session-web.js';
+import { restoreWindowState } from '../../shared/window-state.js';
+import type { WindowStateStore } from './window-state.js';
 import type { WorkbenchCommand } from '../../shared/workbench-commands.js';
 import { validateSampleInput } from '../../../tools/poc/protocol-probe.js';
 import { parseAnswerInput, parseReadConfirmation, parseSendText, requireBoolean } from '../security/workbench-input.js';
+import { parseGoalActionInput, parseSelectModelInput } from '../security/native-input.js';
 import { AuthService } from '../auth/auth-service.js';
 import type { BasicAuthBroker } from '../auth/basic-auth-broker.js';
 import type { CredentialStore } from '../auth/credential-store.js';
@@ -30,16 +33,22 @@ export interface MainWindowOptions {
   readonly credentials: CredentialStore;
   readonly background: BackgroundService;
   readonly layouts: WebLayoutSnapshots;
+  readonly windowState: WindowStateStore;
   readonly choosePetPath: (kind: 'runtime' | 'resources', parent: BrowserWindow) => Promise<void>;
   readonly selectPet: (id: string) => Promise<void>;
   readonly rescanPets: () => Promise<void>;
 }
 export async function openMainWindow(assets: WindowAssets, ipc: IpcRegistry, auth: AuthService, options?: MainWindowOptions): Promise<BrowserWindow> {
+  const primary = screen.getPrimaryDisplay();
+  const restored = restoreWindowState(options?.windowState.get() ?? null, [primary.workArea,
+    ...screen.getAllDisplays().filter(display => display.id !== primary.id).map(display => display.workArea)]);
   const window = new BrowserWindow({
-    width: 1280, height: 860, minWidth: 860, minHeight: 620,
+    ...restored.bounds, minWidth: restored.minWidth, minHeight: restored.minHeight,
     show: false, title: options === undefined ? 'DshDeck · 只读 PoC' : 'DshDeck', autoHideMenuBar: true,
     webPreferences: localWebPreferences('dshdeck-workbench-ui', join(assets.preloadRoot, 'app-preload.cjs')),
   });
+  options?.windowState.bind(window);
+  if (restored.maximized) window.maximize();
   const workbench = options?.workbench;
   const web = options === undefined ? undefined : new SessionWebView(window, assets.preloadRoot, auth, options.workbench, options.basicAuth, options.diagnostics);
   const confirmWebExit = async (): Promise<boolean> => {
@@ -88,6 +97,19 @@ export async function openMainWindow(assets: WindowAssets, ipc: IpcRegistry, aut
       'app:set-manual-unread': (context: unknown, value: unknown) => options.workbench.setManualUnread(parseContext(context), requireBoolean(value)),
       'app:set-draft': (context: unknown, value: unknown) => { if (typeof value !== 'string') throw new ProtocolFault('protocol'); options.workbench.setDraft(parseContext(context), value); },
       'app:send-text': (input: unknown) => options.workbench.send(parseSendText(input)),
+      'app:model-catalog': (context: unknown, refresh: unknown) => options.workbench.modelCatalog(parseContext(context), refresh === undefined ? false : requireBoolean(refresh)),
+      'app:command-catalog': (context: unknown, refresh: unknown) => options.workbench.commandCatalog(parseContext(context), refresh === undefined ? false : requireBoolean(refresh)),
+      'app:select-model': (input: unknown) => options.workbench.selectModel(parseSelectModelInput(input)),
+      'app:goal-action': (input: unknown) => options.workbench.goalAction(parseGoalActionInput(input), async () => {
+        const answer = await dialog.showMessageBox(window, { type: 'question', title: '清除会话目标', message: '清除当前会话的目标？',
+          detail: '此操作修改服务器的目标状态，不删除会话或项目文件；不会自动停止正在运行的任务。', buttons: ['清除目标', '取消'], defaultId: 1, cancelId: 1 });
+        return answer.response === 0;
+      }),
+      'app:execute-command': (input: unknown) => options.workbench.executeCommand(parseSendText(input), async name => {
+        const answer = await dialog.showMessageBox(window, { type: 'question', title: '执行服务器命令', message: `执行 /${name} 命令？`,
+          detail: '命令由服务器或插件实现，可能修改会话状态；选择菜单只填入命令，确认后才提交一次，不会因失败自动重发。', buttons: ['执行命令', '取消'], defaultId: 1, cancelId: 1 });
+        return answer.response === 0;
+      }),
       'app:stop-remote': (context: unknown) => options.workbench.stop(parseContext(context)),
       'app:answer': (input: unknown) => options.workbench.answer(parseAnswerInput(input)),
       'app:sync-now': (context: unknown) => options.workbench.syncNow(parseContext(context)),

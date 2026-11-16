@@ -3,6 +3,7 @@ import type { AnswerInput, ReadConfirmation, SendTextInput, SessionContext, Work
 import type { AppearancePatch, AppearanceSettings } from './appearance.js';
 import type { WebViewport } from './session-web.js';
 import type { WorkbenchCommand } from './workbench-commands.js';
+import type { ModelCatalog, ModelSelection, SelectModelInput, GoalActionInput, CommandDescriptor, CommandExecution } from './native-controls.js';
 
 export interface ServerInput {
   readonly alias: string;
@@ -79,6 +80,7 @@ export interface ServerSnapshot {
   readonly workspaces: readonly WorkspaceBrief[];
   readonly sessions: readonly SessionBrief[];
   readonly failure: PublicFailure | null;
+  readonly authenticationOpen?: boolean;
   readonly sample: ProbeSampleResult | null;
 }
 
@@ -105,6 +107,11 @@ export interface AppBridge {
   setManualUnread(context: SessionContext, unread: boolean): Promise<IpcResult<void>>;
   setDraft(context: SessionContext, text: string): Promise<IpcResult<void>>;
   sendText(input: SendTextInput): Promise<IpcResult<void>>;
+  modelCatalog(context: SessionContext, refresh?: boolean): Promise<IpcResult<ModelCatalog>>;
+  commandCatalog(context: SessionContext, refresh?: boolean): Promise<IpcResult<readonly CommandDescriptor[]>>;
+  selectModel(input: SelectModelInput): Promise<IpcResult<ModelSelection>>;
+  goalAction(input: GoalActionInput): Promise<IpcResult<void>>;
+  executeCommand(input: SendTextInput): Promise<IpcResult<CommandExecution>>;
   stopRemote(context: SessionContext): Promise<IpcResult<void>>;
   answer(input: AnswerInput): Promise<IpcResult<void>>;
   syncNow(context: SessionContext): Promise<IpcResult<void>>;
@@ -137,6 +144,12 @@ export interface AppBridge {
   onOpenSettings(listener: () => void): () => void;
 }
 
+export interface AuthPageState {
+  readonly revision: number;
+  readonly state: 'loading' | 'ready' | 'failed' | 'cancelled';
+  readonly message: string;
+  readonly failure: PublicFailure | null;
+}
 export interface AuthDescription {
   readonly alias: string;
   readonly baseUrl: string;
@@ -145,6 +158,7 @@ export interface AuthDescription {
 /** 仅供本地认证控制页；远程认证页面没有这份 preload。 */
 export interface AuthBridge {
   describe(): Promise<IpcResult<AuthDescription>>;
+  pageState(): Promise<IpcResult<AuthPageState>>;
   navigate(authorizationUrl: string): Promise<IpcResult<void>>;
   finish(): Promise<IpcResult<void>>;
   cancel(): Promise<IpcResult<void>>;

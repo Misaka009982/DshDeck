@@ -1,16 +1,18 @@
 import { parseRemoteEventResult } from '@deepseek-ai/dsh-api-gateway/stream-protocol';
 import { ProtocolFault, requireId, requireKeys, requireRecord } from '../../shared/faults.js';
 import { assertReadRequest, READ_ENDPOINTS } from './read-policy.js';
+import { assertNativeRequest, NATIVE_ENDPOINTS } from './native-policy.js';
 
 export interface BusinessRequest { readonly endpoint: string; readonly payload: { readonly args: Readonly<Record<string, unknown>> } }
 export const MAX_REQUEST_BYTES = 256 * 1024;
 
-/** 写操作仅限人工文本、人工停止和已有事件的应答；不开放创建/激活/设置。 */
+/** 写操作仅限用户主动的文本、停止、应答与原生模型/目标/命令；无凭据和任意设置入口。 */
 export function assertBusinessRequest(value: unknown): asserts value is BusinessRequest {
   const request = requireRecord(value);
   requireKeys(request, ['endpoint', 'payload']);
   const endpoint = requireId(request.endpoint);
   if ((READ_ENDPOINTS as readonly string[]).includes(endpoint)) { assertReadRequest(value); return; }
+  if ((NATIVE_ENDPOINTS as readonly string[]).includes(endpoint)) { assertNativeRequest(value); return; }
   const payload = requireRecord(request.payload);
   requireKeys(payload, ['args']);
   const args = requireRecord(payload.args);

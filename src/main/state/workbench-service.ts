@@ -18,6 +18,8 @@ import type { AdapterCallbacks, AdapterSubscription, WorkbenchAdapter } from '..
 import type { DiagnosticLogger } from '../logging/diagnostic-logger.js';
 import type { AppearanceView } from '../../shared/appearance.js';
 import type { SessionWebState } from '../../shared/session-web.js';
+import type { ModelCatalog, ModelSelection, SelectModelInput, GoalActionInput, CommandDescriptor, CommandExecution } from '../../shared/native-controls.js';
+import { NativeActionLedger, NativeActionNotSent } from './native-action-ledger.js';
 
 interface Binding { readonly adapter: WorkbenchAdapter; readonly scope: ServerScope; readonly signal: AbortSignal }
 interface Foreground { readonly context: SessionContext; readonly controller: AbortController; subscription: AdapterSubscription | undefined }
@@ -43,6 +45,7 @@ export class WorkbenchService {
   private readonly pending = new Map<string, readonly PendingInteraction[]>();
   private readonly failures = new Map<string, PublicFailure>();
   private readonly sends = new Map<string, SendLedger>();
+  private readonly nativeActions = new NativeActionLedger();
   private readonly initializedReads = new Set<string>();
   private readonly reconnects = new Map<string, { attempt: number; timer: ReturnType<typeof setTimeout> }>();
   private readonly connected = new Set<string>();
@@ -219,6 +222,81 @@ export class WorkbenchService {
       throw error;
     } finally { this.changed(); }
   }
+  async modelCatalog(context: SessionContext, refresh = false): Promise<ModelCatalog> {
+    const binding = this.nativeBinding(context);
+    if (binding.adapter.modelCatalog === undefined) throw new ProtocolFault('unsupported');
+    try { const value = await binding.adapter.modelCatalog(binding.signal, refresh); this.nativeBinding(context); return value; }
+    catch (error) { this.nativeFailed(context, error, 'session/modelCatalog'); throw error; }
+  }
+  async commandCatalog(context: SessionContext, refresh = false): Promise<readonly CommandDescriptor[]> {
+    const binding = this.nativeBinding(context);
+    if (binding.adapter.commands === undefined) throw new ProtocolFault('unsupported');
+    try { const value = await binding.adapter.commands(context.sessionId, this.nativeSignal(context, binding), refresh); this.nativeBinding(context); return value; }
+    catch (error) { this.nativeFailed(context, error, 'commands/list'); throw error; }
+  }
+  async selectModel(input: SelectModelInput): Promise<ModelSelection> {
+    const initial = this.nativeBinding(input.context); const signal = this.nativeSignal(input.context, initial);
+    try {
+      return await this.nativeActions.run(input.context, input.requestId, JSON.stringify(['model', input.selection]), async () => {
+        const prepared = await this.prepareNative(async () => {
+          this.assertNativeAction(input.context, signal);
+          const binding = this.nativeBinding(input.context); const select = binding.adapter.selectModel;
+          if (binding.adapter.modelCatalog === undefined || select === undefined) throw new ProtocolFault('unsupported');
+          const catalog = await binding.adapter.modelCatalog(binding.signal); this.nativeBinding(input.context);
+          const group = catalog.groups.find(group => group.id === input.selection.provider);
+          const model = group?.models.find(model => model.id === input.selection.model);
+          if (model === undefined || !catalog.routableProviders.includes(input.selection.provider)
+            || input.selection.reasoningEffort !== undefined && !model.reasoning?.efforts.some(effort => effort.id === input.selection.reasoningEffort)) throw new ProtocolFault('unsupported');
+          return { binding, select };
+        });
+        this.assertNativeAction(input.context, signal);
+        const selected = await prepared.select.call(prepared.binding.adapter, input, signal); this.changed(); return selected;
+      });
+    } catch (error) { this.nativeFailed(input.context, error, 'session/selectModel'); throw error; }
+  }
+  async goalAction(input: GoalActionInput, confirmClear: () => Promise<boolean> = async () => false): Promise<void> {
+    const initial = this.nativeBinding(input.context); const signal = this.nativeSignal(input.context, initial);
+    try {
+      await this.nativeActions.run(input.context, input.requestId, JSON.stringify(['goal', input.action]), async () => {
+        const prepared = await this.prepareNative(async () => {
+          const validate = () => {
+            this.assertNativeAction(input.context, signal);
+            const binding = this.nativeBinding(input.context); const goal = this.cache.get(input.context)?.native.values.goal; const change = binding.adapter.goalAction;
+            if (goal === undefined || change === undefined) throw new ProtocolFault('unsupported');
+            if (input.action.kind === 'create') { if (goal !== null) throw new ProtocolFault('conflict'); }
+            else if (goal === null || goal.goal.id !== input.action.ref.id || goal.goal.revision !== input.action.ref.revision) throw new ProtocolFault('conflict');
+            return { binding, change };
+          };
+          validate(); if (input.action.kind === 'clear' && !await confirmClear()) throw new NativeActionNotSent();
+          return validate();
+        });
+        this.assertNativeAction(input.context, signal);
+        await prepared.change.call(prepared.binding.adapter, input, signal); this.changed();
+      });
+    } catch (error) { this.nativeFailed(input.context, error, input.action.kind === 'create' ? 'goals/create' : input.action.kind === 'edit' ? 'goals/edit' : input.action.kind === 'pause' ? 'goals/pause' : input.action.kind === 'resume' ? 'goals/resume' : 'goals/clear'); throw error; }
+  }
+  async executeCommand(input: SendTextInput, confirm: (name: string) => Promise<boolean>): Promise<CommandExecution> {
+    const initial = this.nativeBinding(input.context); const signal = this.nativeSignal(input.context, initial);
+    try {
+      return await this.nativeActions.run(input.context, input.requestId, JSON.stringify(['command', input.text]), async () => {
+        const prepared = await this.prepareNative(async () => {
+          this.assertNativeAction(input.context, signal);
+          const binding = this.nativeBinding(input.context); const execute = binding.adapter.executeCommand;
+          if (binding.adapter.commands === undefined || execute === undefined) throw new ProtocolFault('unsupported');
+          const name = /^\/([^\s/]+)/u.exec(input.text.trim())?.[1];
+          const command = (await binding.adapter.commands(input.context.sessionId, signal, true)).find(command => command.name === name);
+          if (name === undefined || command === undefined || input.text.trim().slice(name.length + 1).trim() !== '' && command.input === undefined) throw new ProtocolFault('unsupported');
+          this.assertNativeAction(input.context, signal);
+          if (!await confirm(name)) throw new NativeActionNotSent();
+          this.nativeBinding(input.context); return { binding, execute };
+        });
+        this.assertNativeAction(input.context, signal);
+        const execution = await prepared.execute.call(prepared.binding.adapter, input, signal);
+        if (execution.result.kind === 'success' && this.drafts.get(this.pref(input.context)) === input.text) this.drafts.set(this.pref(input.context), '');
+        this.changed(); return execution;
+      });
+    } catch (error) { this.nativeFailed(input.context, error, 'commands/execute'); throw error; }
+  }
   async stop(context: SessionContext): Promise<void> {
     this.assertSelected(context);
     const binding = this.binding(context);
@@ -296,7 +374,7 @@ export class WorkbenchService {
     this.scheduler.dispose(); this.reconciler.dispose(); this.pet?.dispose(); this.notifications?.dispose();
     for (const binding of this.bindings.values()) binding.adapter.dispose();
     for (const id of this.reconnects.keys()) this.clearReconnect(id);
-    this.bindings.clear(); this.cache.clear(); this.drafts.clear(); this.pending.clear(); this.sends.clear();
+    this.bindings.clear(); this.cache.clear(); this.drafts.clear(); this.pending.clear(); this.sends.clear(); this.nativeActions.dispose();
   }
 
   private beginScope(scope: ServerScope): void {
@@ -377,11 +455,23 @@ export class WorkbenchService {
         if (this.cache.get(context)?.hasGap) void this.reconciler.repair(context, binding.adapter, signal).catch(error => this.bodyFailed(context, error));
       },
       assistant: frame => { if (!signal.aborted && this.scopeCurrent(context)) this.cache.applyAssistant(context, frame); },
+      projections: frame => {
+        if (signal.aborted || !this.scopeCurrent(context)) return;
+        this.cache.applyProjections(context, frame);
+        const title = this.cache.get(context)?.title;
+        if (title !== null && title !== undefined) this.state.setTitle(context, context.sessionId, title.text, title.asOfSeq);
+        this.changed();
+      },
+      projectionsFailed: error => { if (!signal.aborted && this.scopeCurrent(context)) { this.cache.setNativeFailure(context, error); if (error.kind !== 'cancelled') this.logger?.fault('read-failed', error, { serverId: context.serverId, generation: context.generation, endpoint: 'session/projections' }); } },
       failed: error => this.bodyFailed(context, error),
     }, signal);
     if (signal.aborted || this.foreground !== foreground) subscription.cancel(); else foreground.subscription = subscription;
   }
-  private stopForeground(): void { this.foreground?.controller.abort(); this.foreground?.subscription?.cancel(); this.foreground = undefined; }
+  private stopForeground(): void {
+    const foreground = this.foreground; this.foreground = undefined;
+    foreground?.controller.abort(); foreground?.subscription?.cancel();
+    if (foreground !== undefined) this.cache.markNativeCached(foreground.context);
+  }
   private acceptCacheFacts(context: SessionContext): void {
     if (!this.scopeCurrent(context)) return;
     const cached = this.cache.get(context); if (cached === undefined) return;
@@ -441,7 +531,7 @@ export class WorkbenchService {
       else if (['auth-required', 'denied'].includes(server.state)) this.pause(server.config.id, true);
       else if (server.state === 'failed' || server.state === 'incompatible') {
         this.pause(server.config.id, false);
-        if (server.failure?.kind === 'network' && this.connected.has(server.config.id)) this.scheduleReconnect(server.config.id);
+        if (!server.authenticationOpen && server.failure?.kind === 'network' && this.connected.has(server.config.id)) this.scheduleReconnect(server.config.id);
       }
     }
     this.changed();
@@ -469,6 +559,29 @@ export class WorkbenchService {
       if (this.foreground !== undefined && sameSession(this.foreground.context, context)) this.stopForeground();
     } else this.cache.setFailure(context, error);
     this.changed();
+  }
+  private async prepareNative<T>(prepare: () => T | Promise<T>): Promise<T> {
+    try { return await prepare(); }
+    catch (error) { throw new NativeActionNotSent(toPublicFailure(error).kind); }
+  }
+  private assertNativeAction(context: SessionContext, signal: AbortSignal): void {
+    if (signal.aborted) throw new NativeActionNotSent();
+    try { this.nativeBinding(context); }
+    catch (error) { throw new NativeActionNotSent(toPublicFailure(error).kind); }
+  }
+  private nativeBinding(context: SessionContext): Binding {
+    this.assertSelected(context);
+    if (this.currentIsWebOwned(context)) throw new ProtocolFault('conflict');
+    const binding = this.binding(context);
+    if (binding.adapter.source !== 'live' || this.directory.session(context.serverId, context.sessionId)?.origin === 'subagent') throw new ProtocolFault('unsupported');
+    return binding;
+  }
+  private nativeSignal(context: SessionContext, binding: Binding): AbortSignal {
+    const foreground = this.foreground;
+    return foreground !== undefined && sameSession(foreground.context, context) ? AbortSignal.any([binding.signal, foreground.controller.signal]) : binding.signal;
+  }
+  private nativeFailed(context: SessionContext, error: unknown, endpoint: string): void {
+    if (this.scopeCurrent(context) && toPublicFailure(error).kind !== 'cancelled') this.logger?.fault('read-failed', error, { serverId: context.serverId, generation: context.generation, endpoint });
   }
   private binding(context: ServerScope): Binding {
     const binding = this.bindings.get(context.serverId);
@@ -514,7 +627,7 @@ export class WorkbenchService {
   private conversation(context: SessionContext): ConversationView {
     const cachedEntry = this.cache.get(context);
     const server = this.auth.list().find(server => server.config.id === context.serverId);
-    const locked = server !== undefined && (server.state === 'authenticating' || server.state === 'auth-required' || server.state === 'denied'
+    const locked = server !== undefined && (server.authenticationOpen || server.state === 'authenticating' || server.state === 'auth-required' || server.state === 'denied'
       || server.config.authProfileId !== context.authProfileId);
     const cached = locked ? undefined : cachedEntry;
     const binding = this.bindings.get(context.serverId);
@@ -528,6 +641,7 @@ export class WorkbenchService {
       events: cached?.events ?? [], assistant: cached?.assistant ?? { revision: 0, activeAttempt: null }, cursor: cached?.cursor ?? -1,
       hasMore: cached?.hasMore ?? false, hasGap: cached?.hasGap ?? false, syncedAt: cached?.syncedAt ?? null,
       syncing: cached?.syncing ?? (cached === undefined && failure === null), draft: this.drafts.get(this.pref(context)) ?? '', failure,
+      ...(cached?.native === undefined ? {} : { native: cached.native }),
       pending: this.pending.get(context.serverId)?.filter(item => item.sessionId === context.sessionId) ?? [], sendState: last?.state ?? 'idle',
     };
   }

@@ -13,6 +13,7 @@ import { localWebPreferences, remoteWebPreferences } from './security-options.js
 import type { WindowAssets } from './window-assets.js';
 import { closeRemotePage } from './close-remote-page.js';
 import { isCertificateFailure } from '../auth/tls-policy.js';
+import { AuthPageStatus } from '../auth/auth-page-state.js';
 import { isNavigationAborted, navigationFields } from '../logging/connection-details.js';
 import { describeLogError } from '../logging/diagnostic-logger.js';
 import type { DiagnosticLogger, LogFields, TransportState } from '../logging/diagnostic-logger.js';
@@ -37,12 +38,15 @@ export function openAuthWindow(
   const allowedOrigins = new Set([new URL(config.baseUrl).origin]);
   const pendingOrigins = new Set<string>();
   let completed = false;
+  const pageStatus = new AuthPageStatus(state => callbacks.pageState?.(state));
+  let primaryTarget = '';
+  let automaticEpoch: number | undefined;
   const pagePath = join(assets.rendererRoot, 'auth.html');
   window.contentView.addChildView(view);
   const layout = (): void => {
     if (window.isDestroyed() || view.webContents.isDestroyed()) return;
     const { width, height } = window.getContentBounds();
-    view.setBounds({ x: 0, y: 146, width, height: Math.max(0, height - 146) });
+    view.setBounds({ x: 0, y: 190, width, height: Math.max(0, height - 190) });
   };
   window.on('resize', layout);
   layout();
@@ -54,6 +58,9 @@ export function openAuthWindow(
     });
   };
   const loadRemote = async (contents: WebContents, url: string): Promise<void> => {
+    const primary = contents === view.webContents;
+    const epoch = primary ? pageStatus.begin(url, config.baseUrl) : 0;
+    if (primary) { automaticEpoch = undefined; primaryTarget = new URL(url).href; }
     recordNavigation('begin', navigationFields(url, config.baseUrl));
     try {
       await session.ready();
@@ -61,17 +68,20 @@ export function openAuthWindow(
       await contents.loadURL(url);
       if (completed || contents.isDestroyed()) throw new ProtocolFault('cancelled');
       recordNavigation('complete', navigationFields(contents.getURL(), config.baseUrl));
+      if (primary) pageStatus.ready(epoch);
     } catch (error) {
       const cancelled = (error instanceof ProtocolFault && error.kind === 'cancelled')
         || isNavigationAborted(error, completed || contents.isDestroyed());
       const fault = cancelled ? new ProtocolFault('cancelled')
         : new ProtocolFault(isCertificateFailure(error) ? 'tls' : 'network');
       recordNavigation(cancelled ? 'cancelled' : 'failed', { ...navigationFields(url, config.baseUrl), failureKind: fault.kind }, error);
+      if (primary) { if (cancelled) pageStatus.cancel(epoch); else pageStatus.fail(epoch, error); }
       throw fault;
     }
   };
 
   const endRemotePage = async (): Promise<void> => {
+    primaryTarget = '';
     for (const popup of popups) if (!popup.isDestroyed()) popup.destroy();
     popups.clear();
     if (!view.webContents.isDestroyed()) {
@@ -109,14 +119,32 @@ export function openAuthWindow(
   const protectRemote = (contents: WebContents, parent: BrowserWindow): void => {
     basicAuth.bind(contents, parent, config.authProfileId, allowedOrigins);
     const navigate = (event: { preventDefault(): void }, url: string): void => {
-      if (isHttpNavigation(url) && allowedOrigins.has(new URL(url).origin)) return;
+      if (isHttpNavigation(url) && allowedOrigins.has(new URL(url).origin)) {
+        if (contents === view.webContents) primaryTarget = new URL(url).href;
+        return;
+      }
       event.preventDefault();
       void approveOrigin(url).then(allowed => {
         if (allowed && !completed && !contents.isDestroyed()) void loadRemote(contents, url).catch(() => {});
       });
     };
-    contents.on('will-navigate', navigate);
+    contents.on('will-navigate', (event, url) => {
+      if (contents === view.webContents && isHttpNavigation(url) && allowedOrigins.has(new URL(url).origin)) {
+        automaticEpoch = pageStatus.begin(url, config.baseUrl);
+      }
+      navigate(event, url);
+    });
     contents.on('will-redirect', navigate);
+    if (contents === view.webContents) {
+      contents.on('did-finish-load', () => {
+        if (!completed && automaticEpoch !== undefined && contents.getURL() === primaryTarget) { pageStatus.ready(automaticEpoch); automaticEpoch = undefined; }
+      });
+      contents.on('did-fail-load', (_event, errorCode, _description, url, mainFrame) => {
+        // 程序 loadURL 用其 Promise 和 epoch 归属；这里只处理网页主动导航，防止同 URL 旧失败串台。
+        if (completed || automaticEpoch === undefined || !mainFrame || errorCode === -3 || !isHttpNavigation(url) || new URL(url).href !== primaryTarget) return;
+        pageStatus.failLoad(automaticEpoch, errorCode); automaticEpoch = undefined;
+      });
+    }
     contents.setWindowOpenHandler(({ url }) => {
       if (completed) return { action: 'deny' };
       if (!isHttpNavigation(url) || !allowedOrigins.has(new URL(url).origin)) {
@@ -148,6 +176,7 @@ export function openAuthWindow(
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   ipc.bind(window, pathToFileURL(pagePath).href, {
     'auth:describe': () => ({ alias: config.alias, baseUrl: config.baseUrl }),
+    'auth:page-state': () => pageStatus.current(),
     'auth:navigate': async value => {
       if (typeof value !== 'string' || value.length > 8192 || !isHttpNavigation(value)) throw new ProtocolFault('protocol');
       // 一次性启动链接仅在此处使用，不保存、不回传主 UI、不拼到 API/WS。

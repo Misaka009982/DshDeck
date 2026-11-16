@@ -66,7 +66,7 @@ export function SessionTree({ snapshot, store, onAdd, onEdit }: Props) {
           <div className="server-line"><button type="button" className="tree-select server-heading" onClick={() => toggle(server.config.id)} onKeyDown={event => {
             if (event.key === 'ArrowLeft' && !folded || event.key === 'ArrowRight' && folded) { toggle(server.config.id); event.preventDefault(); }
           }}><span className="chevron" aria-hidden="true">{folded ? '›' : '⌄'}</span><span className="server-label">{server.config.alias}</span><TaskBadge counts={server.counts} /></button></div>
-          <div className="server-subline"><span className={`connection-mark ${server.state === 'readonly-ready' ? 'online' : ''}`} aria-hidden="true" />{stateText[server.state]}</div>
+          <div className="server-subline" title={server.failure?.message ?? stateText[server.state]}><span className={`connection-mark ${server.state === 'readonly-ready' ? 'online' : ''}`} aria-hidden="true" />{server.authenticationOpen ? server.failure !== null ? '登录页加载失败' : '等待网页登录' : stateText[server.state]}</div>
           {server.config.id !== 'demo' && <div className="server-controls">
             <button type="button" disabled={connecting.has(server.config.id) || server.state === 'probing'} onClick={() => connect(server.config.id)}>连接</button>
             <button type="button" onClick={() => { void store.action(store.api.authenticateServer(server.config.id)); }}>重登</button>

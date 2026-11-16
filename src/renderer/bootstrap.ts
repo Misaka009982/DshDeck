@@ -35,7 +35,7 @@ function button(text: string, clicked: () => void): HTMLButtonElement {
 }
 
 function render(): void {
-  const key = JSON.stringify(servers.map(server => [server.config.id, server.config.alias, server.state, server.generation, selectedId]));
+  const key = JSON.stringify(servers.map(server => [server.config.id, server.config.alias, server.state, server.generation, server.authenticationOpen, server.failure?.kind, selectedId]));
   if (key !== listKey) {
     listKey = key;
     list.replaceChildren();
@@ -46,7 +46,7 @@ function render(): void {
       const select = button('', () => { selectedId = server.config.id; notice(''); render(); });
       select.className = 'server-select';
       const name = document.createElement('span'); name.className = 'server-name'; name.textContent = server.config.alias;
-      const state = document.createElement('span'); state.className = 'server-state'; state.textContent = stateLabels[server.state];
+      const state = document.createElement('span'); state.className = 'server-state'; state.textContent = server.authenticationOpen ? server.failure === null ? '等待网页登录' : '登录页加载失败' : stateLabels[server.state];
       select.append(name, state);
       const actions = document.createElement('div'); actions.className = 'server-row-actions';
       const connect = button('连接', () => { void connectServer(server.config.id); });
@@ -69,7 +69,7 @@ function render(): void {
   element<HTMLButtonElement>('edit-server').disabled = server === undefined;
   element<HTMLButtonElement>('disconnect-server').disabled = server === undefined;
   element('server-title').textContent = server?.config.alias ?? '选择服务器';
-  element('connection-state').textContent = server === undefined ? '' : stateLabels[server.state];
+  element('connection-state').textContent = server === undefined ? '' : server.authenticationOpen ? server.failure === null ? '等待网页登录' : '登录页加载失败' : stateLabels[server.state];
   if (server === undefined) return;
   element('server-address').textContent = server.config.baseUrl;
   element('protocol-hint').textContent = server.failure?.message

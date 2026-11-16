@@ -1,4 +1,4 @@
-import type { ServerConfig, ServerInput, ServerSnapshot, ConnectionState, ProbeSampleInput, ProbeSampleResult, SessionBrief, WorkspaceBrief } from '../../shared/contracts.js';
+import type { ServerConfig, ServerInput, ServerSnapshot, ConnectionState, AuthPageState, ProbeSampleInput, ProbeSampleResult, SessionBrief, WorkspaceBrief } from '../../shared/contracts.js';
 import { ProtocolFault, toPublicFailure } from '../../shared/faults.js';
 import { normalizeServerInput } from '../../shared/server-config.js';
 import { ServerStore } from '../config/server-store.js';
@@ -9,6 +9,7 @@ export interface AuthWindowHandle { focus(): void; close(): void }
 export interface AuthWindowCallbacks {
   finished(): Promise<void>;
   cancelled(): void;
+  pageState?(state: AuthPageState): void;
 }
 export type AuthWindowFactory = (config: ServerConfig, session: ServerSession, callbacks: AuthWindowCallbacks) => AuthWindowHandle;
 interface ProbeHandle {
@@ -135,6 +136,12 @@ export class AuthService {
     runtime.state = 'authenticating';
     try {
       runtime.browser = this.createBrowser(runtime.config, runtime.session, {
+        pageState: page => {
+          if (!this.current(runtime, generation)) return;
+          runtime.failure = page.failure;
+          runtime.state = page.state === 'failed' ? 'failed' : 'authenticating';
+          this.changed();
+        },
         finished: async () => {
           if (!this.current(runtime, generation)) throw new ProtocolFault('cancelled');
           runtime.browser = undefined;
@@ -223,6 +230,7 @@ export class AuthService {
       workspaces: runtime.workspaces.map(workspace => ({ ...workspace, sessionIds: [...workspace.sessionIds] })),
       sessions: runtime.sessions.map(session => ({ ...session })),
       failure: runtime.failure === null ? null : { ...runtime.failure },
+      ...(runtime.browser === undefined ? {} : { authenticationOpen: true }),
       sample: runtime.sample === null ? null : { ...runtime.sample },
     };
   }

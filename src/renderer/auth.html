@@ -9,8 +9,9 @@
 </head>
 <body class="auth-page">
   <header class="auth-toolbar">
-    <div class="auth-heading"><h1 id="auth-title">浏览器登录</h1><div><button id="cancel-auth" type="button">取消</button><button id="finish-auth" class="primary" type="button">已登录，验证连接</button></div></div>
+    <div class="auth-heading"><h1 id="auth-title">浏览器登录</h1><div><button id="cancel-auth" type="button">取消</button><button id="finish-auth" class="primary" type="button" disabled>已登录，验证连接</button></div></div>
     <form id="auth-link-form" class="auth-link-form" autocomplete="off"><input id="auth-link" type="text" maxlength="8192" aria-label="临时认证链接" placeholder="可粘贴官方启动链接，仅在此窗口使用"><button type="submit">打开链接</button></form>
+    <p id="auth-status" class="auth-status" role="status" aria-live="polite">正在打开服务器登录页…</p>
     <p id="auth-note" class="muted small" role="status">认证网页的 dsh 业务流已禁用，页面可能提示断开。验证始终使用左侧保存的服务器链接，临时认证链接不会替换入口。</p>
   </header>
   <script type="module" src="../../dist/src/renderer/auth.js"></script>

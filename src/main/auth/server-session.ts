@@ -17,6 +17,7 @@ import { assertBusinessRequest, MAX_REQUEST_BYTES } from '../protocol/business-p
 import { describeLogError } from '../logging/diagnostic-logger.js';
 import type { ConnectionStep, DiagnosticLogger, LogFields, TransportState } from '../logging/diagnostic-logger.js';
 import { navigationFields, responseCategory } from '../logging/connection-details.js';
+import { isNativeReadRequest } from '../protocol/native-policy.js';
 
 /** 每个 profile 的浏览器、HTTP 和 Node WS 都从此处取得同一认证范围。 */
 export class ServerSession {
@@ -251,7 +252,7 @@ export class ServerSession {
 }
 
 function retryableRead(value: unknown): boolean {
-  try { assertReadRequest(value); return true; } catch { return false; }
+  try { assertReadRequest(value); return true; } catch { return isNativeReadRequest(value); }
 }
 function waitForSignal<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) { void work.catch(() => {}); return Promise.reject(faultForAbort(signal)); }

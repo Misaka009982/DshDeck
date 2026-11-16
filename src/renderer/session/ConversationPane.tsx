@@ -68,11 +68,12 @@ export function ConversationPane({ snapshot, store, overlayOpen = false }: { rea
         {view.hasMore && <button type="button" className="load-older" onClick={() => { void store.action(store.api.loadOlder(view.context)); }}>加载更早历史</button>}
         {view.failure !== null && <div className="inline-failure" role="status">{view.failure.message}<button type="button" onClick={() => { void store.action(store.api.syncNow(view.context)); }}>重试读取</button><button type="button" onClick={() => { void store.action(store.api.authenticateServer(view.context.serverId)); }}>重新登录</button></div>}
         {view.hasGap && <div className="gap-warning" role="status">保留可用缓存，缺失区间尚未补齐；不会标为完整或已读。</div>}
-        <MessageList view={view} mode={mode === 'files' ? 'conversation' : mode} onRead={confirmRead} />
+        <MessageList view={view} mode={mode === 'files' ? 'conversation' : mode} onRead={confirmRead} onOpenOriginal={() => { void store.action(store.api.openFallback(view.context.serverId)); }} />
         {!webReady && <PendingInteractionPanel pending={view.pending} context={view.context} store={store} />}
         {webReady && <div className="web-load-note">当前人工交互由原网页处理；这里展示原生缓存，切回“对话”处理问题与审批。</div>}
         {!webReady && view.pending.length === 0 && (row?.pendingCount ?? 0) > 0 && <div className="gap-warning">服务器确认需要交互，但本客户端未取得可回答的结构；请使用原网页。</div>}
-        <Composer key={`${view.context.serverId}:${view.context.authProfileId}:${view.context.sessionId}`} view={view} store={store} disabled={!ready || webReady} running={row?.running ?? false} />
+        <Composer key={`${view.context.serverId}:${view.context.authProfileId}:${view.context.generation}:${view.context.sessionId}`} view={view} store={store} disabled={!ready || webReady} controlsDisabled={!ready || webReady || row?.origin === 'subagent'} running={row?.running ?? false}
+          onOpenOriginal={() => { choose('conversation'); if (!webReady) void store.action(store.api.openFallback(view.context.serverId)); }} />
       </>}
     </div>
   </main>;

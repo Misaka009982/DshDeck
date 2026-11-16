@@ -10,7 +10,7 @@ import type { AddressKind, NetworkCode, NetworkProtocol, ResponseCategory } from
 export type LogLevel = 'info' | 'warn' | 'error';
 export type LogEvent = 'app-start' | 'app-ready' | 'app-quitting' | 'startup-failed' | 'main-fatal'
   | 'connection-state' | 'ipc-complete' | 'ipc-failed' | 'read-failed' | 'carrier-failed'
-  | 'renderer-gone' | 'renderer-failed' | 'child-process-gone' | 'page-load-failed' | 'transport-state' | 'web-view-state' | 'background-failed' | 'web-layout-cached';
+  | 'renderer-gone' | 'renderer-failed' | 'child-process-gone' | 'page-load-failed' | 'transport-state' | 'web-view-state' | 'background-failed' | 'web-layout-cached' | 'window-state-failed';
 export type ConnectionStep = 'http-proxy' | 'http-auth-check' | 'http-request' | 'http-response' | 'ws-proxy' | 'ws-handshake' | 'auth-navigation' | 'auth-finish';
 export type TransportState = 'begin' | 'headers' | 'open' | 'complete' | 'failed' | 'cancelled' | 'blocked';
 export interface SoftwareInfo {
@@ -67,7 +67,7 @@ interface LogEntry {
 interface LogOptions { readonly enabled?: boolean; readonly maxFileBytes?: number; readonly backups?: number; readonly historyLimit?: number }
 export const DEFAULT_LOG_OPTIONS = { enabled: true, maxFileBytes: 2 * 1024 * 1024, backups: 3, historyLimit: 120 } as const;
 const EVENTS = new Set<LogEvent>(['app-start', 'app-ready', 'app-quitting', 'startup-failed', 'main-fatal', 'connection-state',
-  'ipc-complete', 'ipc-failed', 'read-failed', 'carrier-failed', 'renderer-gone', 'renderer-failed', 'child-process-gone', 'page-load-failed', 'transport-state', 'web-view-state', 'background-failed', 'web-layout-cached']);
+  'ipc-complete', 'ipc-failed', 'read-failed', 'carrier-failed', 'renderer-gone', 'renderer-failed', 'child-process-gone', 'page-load-failed', 'transport-state', 'web-view-state', 'background-failed', 'web-layout-cached', 'window-state-failed']);
 const STEPS = new Set<ConnectionStep>(['http-proxy', 'http-auth-check', 'http-request', 'http-response', 'ws-proxy', 'ws-handshake', 'auth-navigation', 'auth-finish']);
 const TRANSPORT_STATES = new Set<TransportState>(['begin', 'headers', 'open', 'complete', 'failed', 'cancelled', 'blocked']);
 const NETWORK_ERRORS = new Set<string>(NETWORK_CODES);
@@ -75,7 +75,8 @@ const NETWORK_PROTOCOLS = new Set<NetworkProtocol>(['http:', 'https:', 'ws:', 'w
 const RESPONSE_TYPES = new Set<ResponseCategory>(['json', 'multipart', 'html', 'other', 'missing']);
 const ADDRESS_KINDS = new Set<AddressKind>(['loopback', 'tailnet-range', 'private-ip', 'public-ip', 'ipv6', 'hostname']);
 const ENDPOINTS = new Set(['workspace/follow', 'session/list', 'session/follow', 'session/events', 'session/state',
-  'session/observeState', 'session/control', 'session/prompt', 'session/cancel', '$events', '$events/result']);
+  'session/observeState', 'session/control', 'session/prompt', 'session/cancel', 'session/modelCatalog', 'session/projections', 'session/observeProjections', 'session/selectModel',
+  'commands/list', 'commands/execute', 'goals/create', 'goals/edit', 'goals/pause', 'goals/resume', 'goals/clear', '$events', '$events/result']);
 const STATES = new Set<ConnectionState>(['idle', 'authenticating', 'probing', 'readonly-ready', 'auth-required', 'denied', 'incompatible', 'failed', 'cancelled']);
 const FAULTS = new Set<string>(['auth-required', 'forbidden', 'not-found', 'login-response', 'protocol', 'unsupported', 'network',
   'tls', 'cancelled', 'budget', 'timeout', 'conflict', 'uncertain', 'unexpected']);
@@ -83,13 +84,13 @@ const OPERATIONS = new Set(['app:list-servers', 'app:add-server', 'app:edit-serv
   'app:authenticate-server', 'app:disconnect-server', 'app:run-sample', 'app:stop-sample', 'app:workbench', 'app:select-session',
   'app:set-followed', 'app:set-manual-unread', 'app:set-draft', 'app:send-text', 'app:stop-remote', 'app:answer', 'app:sync-now',
   'app:load-older', 'app:confirm-read', 'app:update-settings', 'app:open-fallback', 'app:close-fallback', 'app:choose-pet-path', 'app:select-pet', 'app:rescan-pets',
-  'app:set-demo', 'app:open-logs', 'app:copy-diagnostics', 'app:renderer-failure', 'app:basic-credential-info', 'app:edit-basic-credentials', 'app:forget-basic-credentials', 'auth:describe', 'auth:navigate', 'auth:finish', 'auth:cancel',
+  'app:set-demo', 'app:model-catalog', 'app:command-catalog', 'app:select-model', 'app:goal-action', 'app:execute-command', 'app:open-logs', 'app:copy-diagnostics', 'app:renderer-failure', 'app:basic-credential-info', 'app:edit-basic-credentials', 'app:forget-basic-credentials', 'auth:describe', 'auth:page-state', 'auth:navigate', 'auth:finish', 'auth:cancel',
   'credential:describe', 'credential:submit', 'credential:cancel', 'app:update-appearance', 'app:choose-background', 'app:clear-background', 'app:set-web-viewport', 'app:cache-web-layout', 'app:command-menu', 'app:toggle-web-sidebar', 'app:show-web-files', 'app:show-web-conversation', 'app:open-web-layouts', 'app:open-server-web']);
 const ERROR_NAMES = new Set(['Error', 'TypeError', 'SyntaxError', 'RangeError', 'AbortError', 'ProtocolFault', 'UnexpectedError']);
 const REASONS = new Set(['clean-exit', 'abnormal-exit', 'killed', 'crashed', 'oom', 'launch-failed', 'integrity-failure', 'error', 'unhandled-rejection', 'preload-error']);
 const VIEW_TYPES = new Set(['window', 'webview', 'offscreen', 'remote', 'webContentsView', 'browserView', 'backgroundPage']);
 const PROCESS_TYPES = new Set(['GPU', 'Utility', 'Browser', 'Renderer', 'Zygote', 'Sandbox helper', 'Pepper Plugin']);
-const SOURCE_NAMES = '(?:app|auth-service|server-session|credential-store|credential-vault|basic-auth-broker|basic-challenge|ws-handshake|main-window|auth-window|credential-window|fallback-view|session-web-view|background-service|image-size|web-layout-snapshot|ipc-registry|workbench-service|directory-store|session-state|dsh-web-adapter|rpc|read-only-rpc|read-only-mux|pending-interaction|session-cache|session-reconciler|sync-scheduler|pet-companion|pet-library|pet-assets|diagnostic-logger|connection-details|app-preload|auth-preload|credential-preload|session-web-preload|workbench)';
+const SOURCE_NAMES = '(?:app|auth-service|server-session|credential-store|credential-vault|basic-auth-broker|basic-challenge|ws-handshake|main-window|auth-window|credential-window|fallback-view|session-web-view|background-service|image-size|web-layout-snapshot|auth-page-state|native-policy|native-projections|native-input|native-action-ledger|window-state|ipc-registry|workbench-service|directory-store|session-state|dsh-web-adapter|rpc|read-only-rpc|read-only-mux|pending-interaction|session-cache|session-reconciler|sync-scheduler|pet-companion|pet-library|pet-assets|diagnostic-logger|connection-details|app-preload|auth-preload|credential-preload|session-web-preload|workbench)';
 const FRAME = new RegExp(`^${SOURCE_NAMES}\\.(?:js|cjs|ts):\\d{1,8}:\\d{1,8}$`, 'u');
 const STACK_FRAME = new RegExp(`[/\\\\](${SOURCE_NAMES}\\.(?:js|cjs|ts):\\d{1,8}:\\d{1,8})`, 'gu');
 const MAX_ENTRY_BYTES = 4096;

@@ -13,6 +13,10 @@ import { RemoteMux } from './remote-stream.js';
 import { PendingInteractions, parseEventFrame } from './pending-interaction.js';
 import { nativeOwnsInteraction } from './interaction-ownership.js';
 import type { WebInteractionOwner } from './interaction-ownership.js';
+import { nativeRequest } from './native-policy.js';
+import { parseModelCatalog, parseModelSelection, parseCommands, parseCommandExecution, parseGoalRef, parseGoalSnapshot } from '../../shared/native-controls.js';
+import type { CommandDescriptor, CommandExecution, ModelCatalog, ModelSelection, SelectModelInput, GoalActionInput } from '../../shared/native-controls.js';
+import { parseProjectionBaseline, parseProjectionFrame, ProjectionBuffer } from './native-projections.js';
 
 /** 固定公开协议适配器；目录/事件准入之后才接人工输入，不创建本地或远程 Agent。 */
 export class DshWebAdapter implements WorkbenchAdapter {
@@ -33,6 +37,12 @@ export class DshWebAdapter implements WorkbenchAdapter {
   private readonly deliveries = new Map<string, AbortController>();
   private readonly sent = new Map<string, { text: string; state: 'sending' | 'accepted' | 'uncertain' }>();
   private webOwner: WebInteractionOwner | null = null;
+  private catalog: ModelCatalog | undefined;
+  private catalogFlight: Promise<ModelCatalog> | undefined;
+  private catalogEpoch = 0;
+  private commandEpoch = 0;
+  private readonly commandCatalogs = new Map<string, readonly CommandDescriptor[]>();
+  private readonly commandFlights = new Map<string, Promise<readonly CommandDescriptor[]>>();
 
   constructor(readonly scope: ServerScope, private readonly transport: PocTransport, private readonly callbacks: AdapterCallbacks, lifetime: AbortSignal) {
     this.signal = AbortSignal.any([lifetime, this.controller.signal]);
@@ -65,20 +75,25 @@ export class DshWebAdapter implements WorkbenchAdapter {
     const combined = AbortSignal.any([this.signal, signal]);
     await mux.waitUntilOpen(combined);
     let opened = false;
+    const subscriptions = new Set<AdapterSubscription>();
+    const add = (subscription: AdapterSubscription): void => { if (combined.aborted) subscription.cancel(); else subscriptions.add(subscription); };
     const subscription = mux.subscribe(createReadRequest('session/follow', { sessionId, maxMessages: 40 }), 'detail', value => {
       const frame = requireRecord(value);
       if (!opened) {
         const snapshot = parseFollowSnapshot(value, sessionId);
-        opened = true; callbacks.snapshot(snapshot); return;
+        opened = true; callbacks.snapshot(snapshot);
+        if (callbacks.projections !== undefined) void this.observeNativeProjections(sessionId, callbacks, combined, add);
+        return;
       }
       if (frame.type === 'event') { requireKeys(frame, ['type', 'event']); callbacks.event(parseWireEvent(frame.event)); }
       else if (frame.type === 'assistant-stream') { requireKeys(frame, ['type', 'frame']); callbacks.assistant(parseAssistantFrame(frame.frame)); }
       else throw new ProtocolFault('protocol');
     }, callbacks.failed);
-    const cancel = (): void => subscription.cancel();
+    add(subscription);
+    const cancel = (): void => { for (const stream of subscriptions) stream.cancel(); subscriptions.clear(); };
     combined.addEventListener('abort', cancel, { once: true });
     if (combined.aborted) cancel();
-    return { cancel: () => { combined.removeEventListener('abort', cancel); subscription.cancel(); } };
+    return { cancel: () => { combined.removeEventListener('abort', cancel); cancel(); } };
   }
   async opening(sessionId: string, signal: AbortSignal): Promise<FollowSnapshot> {
     this.assertSession(sessionId);
@@ -134,6 +149,61 @@ export class DshWebAdapter implements WorkbenchAdapter {
       throw error;
     } finally { this.answers.delete(input.interactionId); }
   }
+  async modelCatalog(signal: AbortSignal, refresh = false): Promise<ModelCatalog> {
+    this.assertReady();
+    if (refresh) { this.catalog = undefined; this.catalogEpoch++; }
+    if (this.catalog !== undefined) return this.catalog;
+    if (!refresh && this.catalogFlight !== undefined) return this.catalogFlight;
+    const epoch = this.catalogEpoch;
+    const work = this.read(nativeRequest('session/modelCatalog', {}), signal).then(value => {
+      const catalog = parseModelCatalog(value); if (!this.signal.aborted && epoch === this.catalogEpoch) this.catalog = catalog; return catalog;
+    });
+    this.catalogFlight = work;
+    try { return await work; } finally { if (this.catalogFlight === work) this.catalogFlight = undefined; }
+  }
+  async commands(sessionId: string, signal: AbortSignal, refresh = false): Promise<readonly CommandDescriptor[]> {
+    this.assertReady(); this.assertSession(sessionId);
+    if (refresh) { this.commandCatalogs.delete(sessionId); this.commandEpoch++; }
+    const cached = this.commandCatalogs.get(sessionId); if (cached !== undefined) return cached;
+    const pending = this.commandFlights.get(sessionId); if (pending !== undefined && !refresh) return pending;
+    const epoch = this.commandEpoch;
+    const work = this.read(nativeRequest('commands/list', { agentId: sessionId }), signal).then(value => {
+      const commands = parseCommands(value);
+      if (!this.signal.aborted && epoch === this.commandEpoch) {
+        if (this.commandCatalogs.size >= 128 && !this.commandCatalogs.has(sessionId)) this.commandCatalogs.delete(this.commandCatalogs.keys().next().value ?? '');
+        this.commandCatalogs.set(sessionId, commands);
+      }
+      return commands;
+    });
+    this.commandFlights.set(sessionId, work);
+    try { return await work; } finally { if (this.commandFlights.get(sessionId) === work) this.commandFlights.delete(sessionId); }
+  }
+  async selectModel(input: SelectModelInput, signal: AbortSignal): Promise<ModelSelection> {
+    this.assertReady(); this.assertContext(input.context); this.assertSession(input.context.sessionId);
+    const result = requireRecord(await this.read(nativeRequest('session/selectModel', { request: { sessionId: input.context.sessionId, ...input.selection } }), signal));
+    requireKeys(result, ['selected']); return parseModelSelection(result.selected);
+  }
+  async goalAction(input: GoalActionInput, signal: AbortSignal): Promise<void> {
+    this.assertReady(); this.assertContext(input.context); this.assertSession(input.context.sessionId);
+    const action = input.action; const agentId = input.context.sessionId;
+    const request = action.kind === 'create' ? nativeRequest('goals/create', { agentId, request: { objective: action.objective } })
+      : action.kind === 'edit' ? nativeRequest('goals/edit', { agentId, ref: action.ref, request: { objective: action.objective } })
+        : nativeRequest(action.kind === 'pause' ? 'goals/pause' : action.kind === 'resume' ? 'goals/resume' : 'goals/clear', { agentId, ref: action.ref });
+    const result = await this.read(request, signal);
+    if (action.kind === 'create') parseGoalRef(requireRecord(result).ref);
+    else if (action.kind === 'clear') parseGoalRef(result);
+    else parseGoalSnapshot(result);
+  }
+  async executeCommand(input: SendTextInput, signal: AbortSignal): Promise<CommandExecution> {
+    this.assertReady(); this.assertContext(input.context); this.assertSession(input.context.sessionId);
+    const line = input.text.trim(); const name = /^\/([^\s/]+)/u.exec(line)?.[1];
+    const command = (await this.commands(input.context.sessionId, signal)).find(command => command.name === name);
+    if (command === undefined || name === undefined) throw new ProtocolFault('unsupported');
+    if (line.slice(name.length + 1).trim() !== '' && command.input === undefined) throw new ProtocolFault('unsupported');
+    const result = await this.read(nativeRequest('commands/execute', { agentId: input.context.sessionId, line, submittedAttachments: [] }), signal);
+    if (result === undefined) throw new ProtocolFault('not-found');
+    return parseCommandExecution(result);
+  }
   async sample(_input: ProbeSampleInput): Promise<ProbeSampleResult> { throw new ProtocolFault('unsupported'); }
   stopSample(): void {}
   setWebOwner(owner: WebInteractionOwner | null): void {
@@ -147,7 +217,30 @@ export class DshWebAdapter implements WorkbenchAdapter {
     this.controller.abort(); this.rpc.dispose(); this.mux?.dispose(); this.interactions.dispose();
     for (const controller of this.answers.values()) controller.abort();
     for (const controller of this.deliveries.values()) controller.abort();
-    this.answers.clear(); this.deliveries.clear(); this.sent.clear();
+    this.answers.clear(); this.deliveries.clear(); this.sent.clear(); this.commandCatalogs.clear(); this.commandFlights.clear(); this.catalog = undefined;
+  }
+
+  private async observeNativeProjections(sessionId: string, callbacks: FollowCallbacks, signal: AbortSignal, add: (subscription: AdapterSubscription) => void): Promise<void> {
+    let broken: ProtocolFault | undefined; let reported = false; let projectionStream: AdapterSubscription | undefined;
+    const report = (fault: ProtocolFault): void => {
+      broken = fault; projectionStream?.cancel();
+      if (!signal.aborted && !reported) { reported = true; callbacks.projectionsFailed?.(fault); }
+    };
+    const buffer = new ProjectionBuffer(frame => { if (!signal.aborted && broken === undefined) callbacks.projections?.(frame); });
+    try {
+      await awaitOpening(signal, accept => {
+        const stream = this.requireMux().projections(sessionId, value => {
+          if (signal.aborted || broken !== undefined) return;
+          const frame = parseProjectionFrame(value);
+          if (frame.kind === 'ready') { if (accept.opened()) throw new ProtocolFault('protocol'); accept.ready(); }
+          else { if (!accept.opened()) throw new ProtocolFault('protocol'); buffer.change(frame); }
+        }, fault => { accept.failed(fault); report(fault); });
+        projectionStream = stream; add(stream); return stream;
+      });
+      if (signal.aborted || broken !== undefined) return;
+      const baseline = parseProjectionBaseline(await this.read(nativeRequest('session/projections', { request: { sessionId } }), signal));
+      if (!signal.aborted && broken === undefined) buffer.baseline(baseline);
+    } catch (error) { report(asFault(error)); }
   }
 
   private async openEvents(mux: RemoteMux): Promise<void> {
@@ -196,8 +289,12 @@ export class DshWebAdapter implements WorkbenchAdapter {
       const id = requireId(args[0]); this.summaries = this.summaries.filter(session => session.sessionId !== id); this.callbacks.removed(id);
     } else if (event === 'api-session/added' || event === 'api-session/activity') {
       void this.refreshSessions().catch(fault => this.fail(asFault(fault)));
+    } else if (['llm/adapters-updated', 'llm/models-updated', 'settings/document-updated', 'credentials/record-updated', 'credentials/reference-updated'].includes(event)) {
+      this.catalog = undefined; this.catalogFlight = undefined; this.catalogEpoch++;
+    } else if (event === 'commands/change' || event === 'agent-preset/selected') {
+      this.commandEpoch++; this.commandCatalogs.clear(); this.commandFlights.clear();
     }
-    // 不记录不需要的模型/凭据/插件通知内容，不借工具报错推导整轮失败。
+    // 仅使目录缓存失效，不记录模型/凭据/插件通知内容，也不据工具报错推导整轮失败。
   }
   private async refreshSessions(): Promise<void> {
     if (this.refreshPending !== undefined) return this.refreshPending;

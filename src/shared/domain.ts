@@ -107,6 +107,7 @@ export interface ConversationView {
   readonly hasGap: boolean;
   readonly syncedAt: number | null;
   readonly syncing: boolean;
+  readonly native?: import('./native-controls.js').NativeSnapshot;
   readonly draft: string;
   readonly failure: PublicFailure | null;
   readonly pending: readonly PendingInteraction[];

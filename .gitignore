@@ -12,6 +12,7 @@ tests/
 *.spec.*
 
 # 本地日志、敏感配置和系统杂项。
+window-state.json
 *.log
 .env
 .env.*

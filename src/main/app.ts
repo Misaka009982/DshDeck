@@ -15,6 +15,7 @@ import { NotificationService } from './notifications/notification-service.js';
 import { preferenceKey } from '../shared/domain.js';
 import { ProtocolFault } from '../shared/faults.js';
 import { openMainWindow } from './windows/main-window.js';
+import { WindowStateStore } from './windows/window-state.js';
 import { openAuthWindow } from './windows/auth-window.js';
 import type { WindowAssets } from './windows/window-assets.js';
 import { DiagnosticLogger } from './logging/diagnostic-logger.js';
@@ -47,6 +48,7 @@ let workbench: WorkbenchService | undefined;
 let ipc: IpcRegistry | undefined;
 let credentials: CredentialStore | undefined;
 let background: BackgroundService | undefined;
+let windowState: WindowStateStore | undefined;
 let unsubscribeAuthLogs: (() => void) | undefined;
 let closing = false;
 let finalLogFlushed = false;
@@ -98,12 +100,14 @@ void app.whenReady().then(async () => {
   await service.initialize();
   await store.keepProfiles(new Set(service.list().map(server => server.config.authProfileId))).catch(() => {});
   if (poc || workbench === undefined) { await openMainWindow(assets, registry, service); diagnostics.record('info', 'app-ready'); return; }
+  const states = new WindowStateStore(join(app.getPath('userData'), 'window-state.json'), error => diagnostics.fault('window-state-failed', error));
+  await states.load(); windowState = states;
   const deck = workbench;
   const images = new BackgroundService(deck.preferences, () => deck.refreshPresentation(), diagnostics); background = images;
   await images.initialize(); deck.attachAppearance(images);
   const layouts = new WebLayoutSnapshots(join(app.getPath('userData'), 'web-layout-snapshots'), diagnostics);
   let pet: PetCompanion | undefined;
-  const window = await openMainWindow(assets, registry, service, { workbench: deck, basicAuth, diagnostics, credentials: store, background: images, layouts,
+  const window = await openMainWindow(assets, registry, service, { workbench: deck, basicAuth, diagnostics, credentials: store, background: images, layouts, windowState: states,
     choosePetPath: async (kind, parent) => { if (pet === undefined) throw new ProtocolFault('unsupported'); await pet.choosePath(kind, parent); },
     selectPet: async id => { if (pet === undefined) throw new ProtocolFault('unsupported'); await pet.selectPet(id); },
     rescanPets: async () => { if (pet === undefined) throw new ProtocolFault('unsupported'); await pet.rescan(); },
@@ -147,5 +151,6 @@ app.on('before-quit', event => {
   workbench?.dispose(); auth?.dispose(); ipc?.dispose(); background?.dispose();
   if (auth !== undefined && credentials !== undefined) for (const server of auth.list()) credentials.clear(server.config.authProfileId);
   diagnostics.record('info', 'app-quitting');
-  void Promise.all([diagnostics.flush(), credentials?.flush()]).then(() => { finalLogFlushed = true; app.quit(); });
+  void Promise.all([credentials?.flush(), windowState?.flush()]).then(() => diagnostics.flush())
+    .then(() => { finalLogFlushed = true; app.quit(); });
 });

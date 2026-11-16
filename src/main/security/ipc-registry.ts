@@ -8,18 +8,18 @@ export const IPC_CHANNELS = [
   'app:list-servers', 'app:add-server', 'app:edit-server', 'app:connect-server',
   'app:authenticate-server', 'app:disconnect-server', 'app:run-sample', 'app:stop-sample',
   'app:workbench', 'app:select-session', 'app:set-followed', 'app:set-manual-unread', 'app:set-draft',
-  'app:send-text', 'app:stop-remote', 'app:answer', 'app:sync-now', 'app:load-older', 'app:confirm-read',
+  'app:send-text', 'app:model-catalog', 'app:command-catalog', 'app:select-model', 'app:goal-action', 'app:execute-command', 'app:stop-remote', 'app:answer', 'app:sync-now', 'app:load-older', 'app:confirm-read',
   'app:update-settings', 'app:open-fallback', 'app:close-fallback', 'app:choose-pet-path', 'app:select-pet', 'app:rescan-pets', 'app:set-demo',
   'app:open-logs', 'app:copy-diagnostics', 'app:renderer-failure',
   'app:basic-credential-info', 'app:edit-basic-credentials', 'app:forget-basic-credentials',
   'app:update-appearance', 'app:choose-background', 'app:clear-background', 'app:set-web-viewport',
   'app:cache-web-layout', 'app:command-menu', 'app:toggle-web-sidebar', 'app:show-web-files', 'app:show-web-conversation', 'app:open-web-layouts', 'app:open-server-web',
-  'auth:describe', 'auth:navigate', 'auth:finish', 'auth:cancel',
+  'auth:describe', 'auth:page-state', 'auth:navigate', 'auth:finish', 'auth:cancel',
   'credential:describe', 'credential:submit', 'credential:cancel',
 ] as const;
 export type IpcChannel = typeof IPC_CHANNELS[number];
 export type IpcHandlers = Partial<Record<IpcChannel, (...args: unknown[]) => unknown>>;
-const QUIET_CHANNELS = new Set<IpcChannel>(['app:workbench', 'app:list-servers', 'app:set-draft', 'app:confirm-read', 'app:renderer-failure', 'app:basic-credential-info', 'app:set-web-viewport', 'auth:describe', 'credential:describe']);
+const QUIET_CHANNELS = new Set<IpcChannel>(['app:workbench', 'app:list-servers', 'app:set-draft', 'app:confirm-read', 'app:renderer-failure', 'app:basic-credential-info', 'app:set-web-viewport', 'auth:describe', 'auth:page-state', 'credential:describe']);
 interface Binding {
   readonly pageUrl: string;
   readonly handlers: IpcHandlers;

@@ -51,6 +51,10 @@ export function remoteFault(code: string): ProtocolFault {
   if (code === 'session/not-found' || code === 'workspace/not-found') return new ProtocolFault('not-found');
   if (code === 'gateway/cancelled') return new ProtocolFault('cancelled');
   if (['gateway/method-unavailable', 'gateway/service-unavailable', 'gateway/definition-unavailable', 'gateway/lookup-not-found'].includes(code)) return new ProtocolFault('unsupported');
+  if (code === 'GOAL_STALE_REVISION' || code === 'GOAL_ALREADY_EXISTS' || code === 'GOAL_INVALID_TRANSITION'
+      || code === 'session/writer-held' || code === 'session/agent-busy' || code === 'agent-preset/conflict') return new ProtocolFault('conflict');
+  if (code === 'GOAL_AGENT_NOT_LIVE' || code === 'session/model-unavailable' || code === 'session/provider-models-unavailable' || code === 'session/provider-credentials-unavailable') return new ProtocolFault('unsupported');
+  if (code === 'GOAL_NOT_FOUND') return new ProtocolFault('not-found');
   if (code === 'gateway/interactions-forbidden') return new ProtocolFault('forbidden');
   return new ProtocolFault('protocol');
 }

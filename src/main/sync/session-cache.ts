@@ -3,12 +3,15 @@ import { preferenceKey } from '../../shared/domain.js';
 import { ProtocolFault, toPublicFailure } from '../../shared/faults.js';
 import type { PublicFailure } from '../../shared/faults.js';
 import { parseSessionTitle } from '../../shared/session-title.js';
+import { NATIVE_KEYS, nonnegative, parseNativeValues } from '../../shared/native-controls.js';
+import type { NativeFrame, NativeSnapshot, NativeKey, NativeValues } from '../../shared/native-controls.js';
 
 interface CachedTitle { readonly text: string; readonly asOfSeq: number }
 export interface CacheSnapshot {
   readonly context: SessionContext;
   readonly header: FollowSnapshot['header'];
   readonly title: CachedTitle | null;
+  readonly native: NativeSnapshot;
   readonly events: readonly WireEvent[];
   readonly assistant: AssistantBaseline;
   readonly cursor: number;
@@ -23,6 +26,7 @@ interface Entry {
   context: SessionContext;
   header: FollowSnapshot['header'];
   title: CachedTitle | null;
+  native: NativeSnapshot;
   events: readonly WireEvent[];
   assistant: AssistantBaseline;
   cursor: number;
@@ -49,7 +53,7 @@ export class SessionCache {
     if (entry === undefined) return undefined;
     this.entries.delete(key(context)); this.entries.set(key(context), entry);
     return {
-      context: { ...context }, header: { ...entry.header }, title: entry.title === null ? null : { ...entry.title }, events: entry.events, assistant: entry.assistant,
+      context: { ...context }, header: { ...entry.header }, title: entry.title === null ? null : { ...entry.title }, native: entry.native, events: entry.events, assistant: entry.assistant,
       cursor: entry.cursor, hasMore: entry.hasMore, hasGap: entry.hasGap, freshness: entry.freshness,
       syncing: entry.syncing, syncedAt: entry.syncedAt, failure: entry.failure,
     };
@@ -66,8 +70,10 @@ export class SessionCache {
     const first = events[0]?.seq ?? -1;
     const text = parseSessionTitle(snapshot.projections.title);
     const title = newerTitle(newerTitle(reusable ? previous.title : null, text === undefined ? null : { text, asOfSeq: snapshot.cursor }), titleFromEvents(events));
+    const native: NativeSnapshot = reusable && previous.native.asOfSeq >= snapshot.cursor ? previous.native
+      : { asOfSeq: snapshot.cursor, ...parseNativeValues(snapshot.projections), state: reusable && previous.native.state === 'live' ? 'live' : 'cached', failure: null };
     const entry: Entry = {
-      context: { ...context }, header: { ...snapshot.header }, title, events, cursor, assistant,
+      context: { ...context }, header: { ...snapshot.header }, title, native, events, cursor, assistant,
       hasMore: first > 0 || (snapshot.hasMore && (!reusable || previous.hasMore)), hasGap: hasGap(events, cursor),
       freshness: 'fresh', syncing: previous?.syncing ?? false, syncedAt: this.now(), failure: null,
       settlementSeq: reusable ? previous.settlementSeq : null, bytes: 0,
@@ -123,6 +129,33 @@ export class SessionCache {
     const entry = { ...previous, assistant, settlementSeq, freshness: 'fresh' as const, syncedAt: this.now() };
     this.admit(context, entry);
   }
+  applyProjections(context: SessionContext, frame: NativeFrame): void {
+    const previous = this.require(context); const seq = frame.kind === 'baseline' ? nonnegative(frame.asOfSeq, -1) : nonnegative(frame.seq);
+    if (seq < previous.native.asOfSeq || frame.kind === 'change' && seq === previous.native.asOfSeq) return;
+    let values: NativeValues; let invalid: readonly NativeKey[];
+    if (frame.kind === 'baseline') ({ values, invalid } = parseNativeValues(frame.values));
+    else {
+      const changed = Object.fromEntries(frame.changes.filter(change => (NATIVE_KEYS as readonly string[]).includes(change.key)).map(change => [change.key, change.val]));
+      const parsed = parseNativeValues(changed); const next: Record<string, unknown> = { ...previous.native.values }; const unavailable = new Set(previous.native.invalid);
+      for (const key of NATIVE_KEYS) if (Object.hasOwn(changed, key)) {
+        if (parsed.invalid.includes(key)) { delete next[key]; unavailable.add(key); }
+        else { next[key] = parsed.values[key]; unavailable.delete(key); }
+      }
+      values = next as NativeValues; invalid = [...unavailable];
+    }
+    const titleValue = frame.kind === 'baseline' ? frame.values.title : frame.changes.find(change => change.key === 'title')?.val;
+    const title = parseSessionTitle(titleValue);
+    this.admit(context, { ...previous, native: { asOfSeq: seq, values, invalid, state: 'live', failure: null },
+      title: newerTitle(previous.title, title === undefined ? null : { text: title, asOfSeq: seq }) });
+  }
+  setNativeFailure(context: SessionContext, error: unknown): void {
+    const entry = this.match(context);
+    if (entry !== undefined) { entry.native = { ...entry.native, state: 'stale', failure: toPublicFailure(error) }; this.changed(); }
+  }
+  markNativeCached(context: SessionContext): void {
+    const entry = this.match(context);
+    if (entry?.native.state === 'live') { entry.native = { ...entry.native, state: 'cached' }; this.changed(); }
+  }
   setSyncing(context: SessionContext, syncing: boolean): void {
     const entry = this.match(context);
     if (entry !== undefined && entry.syncing !== syncing) { entry.syncing = syncing; this.changed(); }
@@ -140,7 +173,7 @@ export class SessionCache {
     }
     return null;
   }
-  markStale(serverId: string): void { for (const entry of this.entries.values()) if (entry.context.serverId === serverId) { entry.freshness = 'stale'; entry.syncing = false; } this.changed(); }
+  markStale(serverId: string): void { for (const entry of this.entries.values()) if (entry.context.serverId === serverId) { entry.freshness = 'stale'; entry.syncing = false; entry.native = { ...entry.native, state: 'stale' }; } this.changed(); }
   remove(context: SessionContext): void { this.entries.delete(key(context)); this.revokedSessions.set(key(context), context.generation); this.changed(); }
   revoke(serverId: string, generation?: number): void {
     let through = generation ?? -1;
@@ -156,7 +189,7 @@ export class SessionCache {
   }
   private require(context: SessionContext): Entry { const entry = this.match(context); if (entry === undefined) throw new ProtocolFault('protocol'); return entry; }
   private admit(context: SessionContext, entry: Entry): void {
-    entry.bytes = Buffer.byteLength(JSON.stringify({ events: entry.events, assistant: entry.assistant, title: entry.title }), 'utf8');
+    entry.bytes = Buffer.byteLength(JSON.stringify({ events: entry.events, assistant: entry.assistant, title: entry.title, native: entry.native }), 'utf8');
     // 过大的正文或 attempt 保留旧缓存并报告，不无限扩大当前会话预算。
     if (entry.bytes > Math.min(this.budget, 8 * 1024 * 1024)) throw new ProtocolFault('budget');
     this.entries.delete(key(context)); this.entries.set(key(context), entry);

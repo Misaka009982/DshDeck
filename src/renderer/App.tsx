@@ -75,7 +75,6 @@ export function App() {
       else if (result.value === 'add-server') add();
       else if (result.value === 'logs') await store.action(store.api.openLogs());
       else if (result.value === 'copy-diagnostics') copyDiagnostics();
-      else if (result.value === 'licenses') await store.action(store.api.openLicenses());
       else if (result.value === 'close-web') await store.action(store.api.closeFallback());
       else if (result.value === 'disconnect' && server !== undefined && server.config.id !== 'demo') await store.action(store.api.disconnectServer(server.config.id));
       else if (result.value === 'toggle-web-sidebar') await store.action(store.api.toggleWebSidebar());

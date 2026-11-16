@@ -45,7 +45,6 @@ export function WorkbenchSettingsDialog({ snapshot, store, open, close }: { read
     <section className="settings-section"><h3>演示与兼容</h3><label className="checkbox-setting"><input type="checkbox" checked={snapshot.demo} onChange={event => { void store.action(store.api.setDemo(event.target.checked)); }} />显示合成演示数据（不联网，不执行任务）</label>
       <p className="muted small">真实部署兼容、认证、流量和缓存时延仍需在全部实现后统一验证。</p>
     </section>
-    <section className="settings-section"><h3>许可与源码</h3><p className="muted small">DshDeck 按 AGPL-3.0-or-later 提供；内置宠物改编自 CLI-Manager/pet-e，原作者保留权利。本程序不提供担保，可按许可复制、修改和再分发；第三方宠物图片不随包提供。</p><button type="button" onClick={() => { void store.action(store.api.openLicenses()); }}>查看完整许可与对应源码</button></section>
     <footer className="dialog-actions"><button type="button" className="primary" onClick={close}>完成</button></footer>
   </dialog>;
 }

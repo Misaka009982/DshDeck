@@ -11,7 +11,8 @@ function subscribe<T>(channel: string, listener: (value: T) => void): () => void
   ipcRenderer.on(channel, receive); return () => ipcRenderer.removeListener(channel, receive);
 }
 const bridge: PetBridge = {
-  ready: () => invoke('pet:ready'), setMouseInteractive: value => invoke('pet:mouse-interactive', value), action: value => invoke('pet:action', value),
+  ready: () => invoke('pet:ready'), setMouseInteractive: value => invoke('pet:mouse-interactive', value), drag: value => invoke('pet:drag', value), action: value => invoke('pet:action', value),
+  onDragEnded: listener => subscribe<string>('pet:drag-ended', listener),
   onConfig: listener => subscribe<PetViewConfig>('pet:config', listener), onSnapshot: listener => subscribe<PetViewSnapshot>('pet:snapshot', listener),
 };
 contextBridge.exposeInMainWorld('dshDeckPet', Object.freeze(bridge));

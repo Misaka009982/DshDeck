@@ -11,7 +11,7 @@ export type LogLevel = 'info' | 'warn' | 'error';
 export type LogEvent = 'app-start' | 'app-ready' | 'app-quitting' | 'startup-failed' | 'main-fatal'
   | 'connection-state' | 'ipc-complete' | 'ipc-failed' | 'read-failed' | 'carrier-failed'
   | 'renderer-gone' | 'renderer-failed' | 'child-process-gone' | 'page-load-failed' | 'transport-state' | 'web-view-state' | 'background-failed' | 'web-layout-cached' | 'window-state-failed' | 'connection-intent-failed' | 'reconnect-state';
-export type ConnectionStep = 'http-proxy' | 'http-auth-check' | 'http-request' | 'http-response' | 'ws-proxy' | 'ws-handshake' | 'auth-navigation' | 'auth-finish' | 'line-tcp' | 'line-http' | 'ws-carrier';
+export type ConnectionStep = 'http-proxy' | 'http-auth-check' | 'http-request' | 'http-response' | 'ws-proxy' | 'ws-handshake' | 'auth-navigation' | 'auth-finish' | 'line-tcp' | 'line-http' | 'ws-carrier' | 'ws-stream';
 export type TransportState = 'begin' | 'headers' | 'open' | 'complete' | 'failed' | 'cancelled' | 'blocked';
 export interface SoftwareInfo {
   readonly appVersion: string;
@@ -52,6 +52,8 @@ export interface LogFields {
   readonly targetPort?: number;
   readonly elapsedMs?: number;
   readonly wsCloseCode?: number;
+  readonly wsCompression?: boolean;
+  readonly streamRole?: 'directory' | 'detail' | 'state';
   readonly connectionAgeSeconds?: number;
   readonly connectionAborted?: boolean;
   readonly recoveryTarget?: 'server' | 'conversation';
@@ -76,7 +78,7 @@ interface LogOptions { readonly enabled?: boolean; readonly maxFileBytes?: numbe
 export const DEFAULT_LOG_OPTIONS = { enabled: true, maxFileBytes: 2 * 1024 * 1024, backups: 3, historyLimit: 120 } as const;
 const EVENTS = new Set<LogEvent>(['app-start', 'app-ready', 'app-quitting', 'startup-failed', 'main-fatal', 'connection-state',
   'ipc-complete', 'ipc-failed', 'read-failed', 'carrier-failed', 'renderer-gone', 'renderer-failed', 'child-process-gone', 'page-load-failed', 'transport-state', 'web-view-state', 'background-failed', 'web-layout-cached', 'window-state-failed', 'connection-intent-failed', 'reconnect-state']);
-const STEPS = new Set<ConnectionStep>(['http-proxy', 'http-auth-check', 'http-request', 'http-response', 'ws-proxy', 'ws-handshake', 'auth-navigation', 'auth-finish', 'line-tcp', 'line-http', 'ws-carrier']);
+const STEPS = new Set<ConnectionStep>(['http-proxy', 'http-auth-check', 'http-request', 'http-response', 'ws-proxy', 'ws-handshake', 'auth-navigation', 'auth-finish', 'line-tcp', 'line-http', 'ws-carrier', 'ws-stream']);
 const TRANSPORT_STATES = new Set<TransportState>(['begin', 'headers', 'open', 'complete', 'failed', 'cancelled', 'blocked']);
 const NETWORK_ERRORS = new Set<string>(NETWORK_CODES);
 const NETWORK_PROTOCOLS = new Set<NetworkProtocol>(['http:', 'https:', 'ws:', 'wss:']);
@@ -92,14 +94,14 @@ const OPERATIONS = new Set(['app:list-servers', 'app:add-server', 'app:edit-serv
   'app:authenticate-server', 'app:disconnect-server', 'app:run-sample', 'app:stop-sample', 'app:workbench', 'app:select-session',
   'app:set-followed', 'app:set-manual-unread', 'app:set-draft', 'app:send-text', 'app:stop-remote', 'app:answer', 'app:sync-now',
   'app:load-older', 'app:confirm-read', 'app:update-settings', 'app:open-fallback', 'app:close-fallback', 'app:choose-pet-path', 'app:select-pet', 'app:rescan-pets',
-  'app:update-pet-display', 'app:open-licenses', 'app:job-view', 'app:release-jobs', 'pet:ready', 'pet:mouse-interactive', 'pet:action',
+  'app:update-pet-display', 'app:open-licenses', 'app:job-view', 'app:release-jobs', 'pet:ready', 'pet:mouse-interactive', 'pet:drag', 'pet:action',
   'app:set-demo', 'app:model-catalog', 'app:command-catalog', 'app:select-model', 'app:goal-action', 'app:execute-command', 'app:file-workspace', 'app:file-directory', 'app:file-preview', 'app:release-files', 'app:check-network', 'app:open-logs', 'app:copy-diagnostics', 'app:renderer-failure', 'app:basic-credential-info', 'app:edit-basic-credentials', 'app:forget-basic-credentials', 'auth:describe', 'auth:page-state', 'auth:navigate', 'auth:finish', 'auth:cancel',
   'credential:describe', 'credential:submit', 'credential:cancel', 'app:update-appearance', 'app:choose-background', 'app:clear-background', 'app:set-web-viewport', 'app:cache-web-layout', 'app:command-menu', 'app:toggle-web-sidebar', 'app:show-web-files', 'app:show-web-conversation', 'app:open-web-layouts', 'app:open-server-web']);
 const ERROR_NAMES = new Set(['Error', 'TypeError', 'SyntaxError', 'RangeError', 'AbortError', 'ProtocolFault', 'UnexpectedError']);
 const REASONS = new Set(['clean-exit', 'abnormal-exit', 'killed', 'crashed', 'oom', 'launch-failed', 'integrity-failure', 'error', 'unhandled-rejection', 'preload-error']);
 const VIEW_TYPES = new Set(['window', 'webview', 'offscreen', 'remote', 'webContentsView', 'browserView', 'backgroundPage']);
 const PROCESS_TYPES = new Set(['GPU', 'Utility', 'Browser', 'Renderer', 'Zygote', 'Sandbox helper', 'Pepper Plugin']);
-const SOURCE_NAMES = '(?:app|auth-service|server-session|credential-store|credential-vault|basic-auth-broker|basic-challenge|ws-handshake|main-window|auth-window|credential-window|fallback-view|session-web-view|background-service|image-size|web-layout-snapshot|auth-page-state|network-check|connection-intents|recovery|file-share-reader|file-input|files|native-policy|native-projections|native-input|native-action-ledger|window-state|ipc-registry|workbench-service|directory-store|session-state|dsh-web-adapter|rpc|read-only-rpc|read-only-mux|pending-interaction|session-cache|session-reconciler|sync-scheduler|pet-companion|pet-library|pet-assets|diagnostic-logger|connection-details|app-preload|auth-preload|credential-preload|session-web-preload|workbench)';
+const SOURCE_NAMES = '(?:app|auth-service|server-session|credential-store|credential-vault|basic-auth-broker|basic-challenge|ws-handshake|main-window|auth-window|credential-window|fallback-view|session-web-view|background-service|image-size|web-layout-snapshot|auth-page-state|network-check|connection-intents|recovery|file-share-reader|file-input|files|native-policy|native-projections|native-input|native-action-ledger|window-state|ipc-registry|workbench-service|directory-store|session-state|dsh-web-adapter|rpc|read-only-rpc|read-only-mux|pending-interaction|session-cache|session-reconciler|sync-scheduler|pet-companion|pet-window|pet-drag|pet-library|pet-assets|diagnostic-logger|connection-details|app-preload|auth-preload|credential-preload|session-web-preload|workbench)';
 const FRAME = new RegExp(`^${SOURCE_NAMES}\\.(?:js|cjs|ts):\\d{1,8}:\\d{1,8}$`, 'u');
 const STACK_FRAME = new RegExp(`[/\\\\](${SOURCE_NAMES}\\.(?:js|cjs|ts):\\d{1,8}:\\d{1,8})`, 'gu');
 const MAX_ENTRY_BYTES = 4096;
@@ -112,13 +114,14 @@ export function sanitizeLogFields(value: unknown): Readonly<Record<string, unkno
   for (const key of ['generation', 'workspaceCount', 'sessionCount', 'errorCode', 'exitCode', 'rendererLine', 'rendererColumn'] as const) {
     if (typeof value[key] === 'number' && Number.isSafeInteger(value[key])) fields[key] = value[key];
   }
-  for (const key of ['mainFrame', 'originMatchesBase', 'pathMatchesBase', 'targetLoopback', 'redirectChangesOrigin', 'redirectToLoopback', 'connectionAborted'] as const) {
+  for (const key of ['mainFrame', 'originMatchesBase', 'pathMatchesBase', 'targetLoopback', 'redirectChangesOrigin', 'redirectToLoopback', 'connectionAborted', 'wsCompression'] as const) {
     if (typeof value[key] === 'boolean') fields[key] = value[key];
   }
   if (typeof value.httpStatus === 'number' && Number.isSafeInteger(value.httpStatus) && value.httpStatus >= 100 && value.httpStatus <= 599) fields.httpStatus = value.httpStatus;
   if (typeof value.connectionStep === 'string' && STEPS.has(value.connectionStep as ConnectionStep)) fields.connectionStep = value.connectionStep;
   if (typeof value.transportState === 'string' && TRANSPORT_STATES.has(value.transportState as TransportState)) fields.transportState = value.transportState;
   if (typeof value.endpoint === 'string' && ENDPOINTS.has(value.endpoint)) fields.endpoint = value.endpoint;
+  if (value.streamRole === 'directory' || value.streamRole === 'detail' || value.streamRole === 'state') fields.streamRole = value.streamRole;
   if (typeof value.networkCode === 'string' && NETWORK_ERRORS.has(value.networkCode)) fields.networkCode = value.networkCode;
   if (typeof value.networkProtocol === 'string' && NETWORK_PROTOCOLS.has(value.networkProtocol as NetworkProtocol)) fields.networkProtocol = value.networkProtocol;
   if (typeof value.responseType === 'string' && RESPONSE_TYPES.has(value.responseType as ResponseCategory)) fields.responseType = value.responseType;

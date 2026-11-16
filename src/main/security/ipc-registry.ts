@@ -16,11 +16,11 @@ export const IPC_CHANNELS = [
   'app:cache-web-layout', 'app:command-menu', 'app:toggle-web-sidebar', 'app:show-web-files', 'app:show-web-conversation', 'app:open-web-layouts', 'app:open-server-web',
   'auth:describe', 'auth:page-state', 'auth:navigate', 'auth:finish', 'auth:cancel',
   'credential:describe', 'credential:submit', 'credential:cancel',
-  'pet:ready', 'pet:mouse-interactive', 'pet:action',
+  'pet:ready', 'pet:mouse-interactive', 'pet:drag', 'pet:action',
 ] as const;
 export type IpcChannel = typeof IPC_CHANNELS[number];
 export type IpcHandlers = Partial<Record<IpcChannel, (...args: unknown[]) => unknown>>;
-const QUIET_CHANNELS = new Set<IpcChannel>(['pet:ready', 'pet:mouse-interactive', 'app:workbench', 'app:list-servers', 'app:set-draft', 'app:confirm-read', 'app:renderer-failure', 'app:basic-credential-info', 'app:set-web-viewport', 'app:release-files', 'app:job-view', 'app:release-jobs', 'auth:describe', 'auth:page-state', 'credential:describe']);
+const QUIET_CHANNELS = new Set<IpcChannel>(['pet:ready', 'pet:mouse-interactive', 'pet:drag', 'app:workbench', 'app:list-servers', 'app:set-draft', 'app:confirm-read', 'app:renderer-failure', 'app:basic-credential-info', 'app:set-web-viewport', 'app:release-files', 'app:job-view', 'app:release-jobs', 'auth:describe', 'auth:page-state', 'credential:describe']);
 interface Binding {
   readonly pageUrl: string;
   readonly handlers: IpcHandlers;

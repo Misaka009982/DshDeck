@@ -47,7 +47,7 @@ export class AuthService {
     private readonly store: ServerStore,
     private readonly createSession: (config: ServerConfig) => ServerSession,
     private readonly createBrowser: AuthWindowFactory,
-    private readonly createProbe: ProbeFactory = (session, generation, signal, failed) => new ProtocolProbe(session.transport(signal), generation, signal, failed),
+    private readonly createProbe: ProbeFactory = (session, generation, signal, failed) => new ProtocolProbe(session.transport(signal, generation), generation, signal, failed),
   ) {}
 
   async initialize(): Promise<void> {

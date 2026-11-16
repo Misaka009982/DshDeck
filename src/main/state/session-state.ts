@@ -28,7 +28,7 @@ export class SessionStateStore {
     this.facts.set(key, {
       ...scope, sessionId: summary.sessionId, title,
       running, agentAvailable: previous?.stateObserved ? previous.agentAvailable : summary.agentAvailable,
-      freshness: 'fresh', accessible: previous?.accessible ?? true, archived: previous?.archived ?? false,
+      freshness: previous?.freshness ?? 'fresh', accessible: previous?.accessible ?? true, archived: previous?.archived ?? false,
       cursor: previous?.cursor ?? -1, baselineCursor: previous?.baselineCursor ?? null,
       pendingIds: previous?.pendingIds ?? [], terminal: running && !previous?.running ? null : previous?.terminal ?? null,
       terminalIsNew: running && !previous?.running ? false : previous?.terminalIsNew ?? false,
@@ -38,13 +38,22 @@ export class SessionStateStore {
   primeCursor(scope: ServerScope, sessionId: string, cursor: number): void {
     this.update(scope, sessionId, facts => ({ ...facts, baselineCursor: facts.baselineCursor ?? cursor, cursor: Math.max(facts.cursor, cursor) }));
   }
-  setState(scope: ServerScope, sessionId: string, state: { cursor: number; running: boolean; active: boolean; pendingIds: readonly string[] }): void {
-    this.update(scope, sessionId, facts => state.cursor < facts.cursor ? facts : ({
-      ...facts, cursor: state.cursor, baselineCursor: facts.baselineCursor ?? state.cursor,
-      running: state.running, agentAvailable: state.active, pendingIds: [...state.pendingIds], stateObserved: true,
-      terminal: state.running && !facts.running ? null : facts.terminal,
-      terminalIsNew: state.running && !facts.running ? false : facts.terminalIsNew,
-    }));
+  setState(scope: ServerScope, sessionId: string, state: { cursor: number; running: boolean; active: boolean; pendingIds: readonly string[] }): boolean {
+    return this.update(scope, sessionId, facts => {
+      if (state.cursor < facts.cursor) return facts;
+      if (facts.cursor === state.cursor && facts.running === state.running && facts.agentAvailable === state.active
+        && facts.stateObserved && facts.baselineCursor !== null && facts.freshness === 'fresh' && facts.pendingIds.length === state.pendingIds.length
+        && facts.pendingIds.every((id, index) => id === state.pendingIds[index])) return facts;
+      return {
+        ...facts, cursor: state.cursor, baselineCursor: facts.baselineCursor ?? state.cursor,
+        running: state.running, agentAvailable: state.active, pendingIds: [...state.pendingIds], stateObserved: true, freshness: 'fresh',
+        terminal: state.running && !facts.running ? null : facts.terminal,
+        terminalIsNew: state.running && !facts.running ? false : facts.terminalIsNew,
+      };
+    });
+  }
+  markSessionStale(scope: ServerScope, sessionId: string): boolean {
+    return this.update(scope, sessionId, facts => facts.freshness === 'stale' ? facts : { ...facts, freshness: 'stale' });
   }
   setRunning(scope: ServerScope, sessionId: string, running: boolean): void {
     this.update(scope, sessionId, facts => ({ ...facts, running, stateObserved: true,
@@ -79,11 +88,12 @@ export class SessionStateStore {
   all(): readonly SessionFacts[] { return [...this.facts.values()].map(cloneFacts); }
 
   private matches(scope: ServerScope): boolean { const current = this.scopes.get(scope.serverId); return current?.authProfileId === scope.authProfileId && current.generation === scope.generation; }
-  private update(scope: ServerScope, sessionId: string, apply: (facts: SessionFacts) => SessionFacts): void {
-    if (!this.matches(scope)) return;
+  private update(scope: ServerScope, sessionId: string, apply: (facts: SessionFacts) => SessionFacts): boolean {
+    if (!this.matches(scope)) return false;
     const key = sessionKey(scope.serverId, sessionId);
-    const facts = this.facts.get(key);
-    if (facts !== undefined) this.facts.set(key, apply(facts));
+    const facts = this.facts.get(key); if (facts === undefined) return false;
+    const next = apply(facts); if (next === facts) return false;
+    this.facts.set(key, next); return true;
   }
 }
 

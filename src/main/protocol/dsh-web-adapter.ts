@@ -1,15 +1,17 @@
 import type { PocTransport } from '../../../tools/poc/protocol-probe.js';
 import type { AdapterCallbacks, AdapterSubscription, FollowCallbacks, WorkbenchAdapter } from './adapter.js';
 import type { AnswerInput, FollowSnapshot, HistoryPage, SendTextInput, ServerScope } from '../../shared/domain.js';
-import type { ProbeSampleInput, ProbeSampleResult } from '../../shared/contracts.js';
+import type { ProbeSampleInput, ProbeSampleResult, WorkspaceBrief } from '../../shared/contracts.js';
 import type { DirectorySession } from '../state/directory-store.js';
 import { ProtocolFault, requireId, requireKeys, requireRecord } from '../../shared/faults.js';
+import { recoveryDelayMs } from '../../shared/recovery.js';
 import { createReadRequest } from './read-policy.js';
 import { promptRequest } from './business-policy.js';
 import { parseSessionList, parseWorkspaceFrame } from './read-values.js';
 import { parseAssistantFrame, parseFollowSnapshot, parseHistory, parsePassiveState, parseWireEvent } from './wire-values.js';
 import { RemoteRpc } from './rpc.js';
 import { RemoteMux } from './remote-stream.js';
+import type { ReadSubscription } from './read-only-mux.js';
 import { PendingInteractions, parseEventFrame } from './pending-interaction.js';
 import { nativeOwnsInteraction } from './interaction-ownership.js';
 import type { WebInteractionOwner } from './interaction-ownership.js';
@@ -33,6 +35,7 @@ export class DshWebAdapter implements WorkbenchAdapter {
   private ready = false;
   private clientId: string | null = null;
   private statePolling = true;
+  private readonly stateRetries = new Map<string, { attempt: number; retryAt: number }>();
   private polling: ReturnType<typeof setTimeout> | undefined;
   private refreshPending: Promise<void> | undefined;
   private readonly answers = new Map<string, AbortController>();
@@ -58,17 +61,15 @@ export class DshWebAdapter implements WorkbenchAdapter {
     await this.refreshSessions();
     const socket = await this.transport.openWebSocket(this.signal);
     if (this.signal.aborted) { socket.close(); throw new ProtocolFault('cancelled'); }
-    const mux = new RemoteMux(socket, this.scope.generation, () => {}, fault => this.fail(fault));
+    const mux = new RemoteMux(socket, this.scope.generation, () => {}, fault => this.fail(fault), value => this.transport.streamDiagnostic?.(value));
     this.mux = mux;
     await mux.waitUntilOpen(this.signal);
     await this.openEvents(mux);
-    const opening = parseWorkspaceFrame(await mux.readOpening(createReadRequest('workspace/follow'), 'directory', this.signal));
-    if (opening.type !== 'baseline') throw new ProtocolFault('protocol');
-    // 先安装长期目录流，再替换基线；第二个开场覆盖之前读到的短暂目录。
-    await this.openWorkspaces(mux);
+    // 同一长期流的首个基线已证明工作区权限，不再另开临时流重复读取。
+    const workspaces = await this.openWorkspaces(mux);
     this.ready = true;
     this.schedulePoll(0);
-    return { workspaces: opening.value.items, sessions: this.summaries };
+    return { workspaces, sessions: this.summaries };
   }
 
   async follow(sessionId: string, callbacks: FollowCallbacks, signal: AbortSignal): Promise<AdapterSubscription> {
@@ -239,7 +240,7 @@ export class DshWebAdapter implements WorkbenchAdapter {
     this.controller.abort(); this.rpc.dispose(); this.mux?.dispose(); this.interactions.dispose();
     for (const controller of this.answers.values()) controller.abort();
     for (const controller of this.deliveries.values()) controller.abort();
-    this.answers.clear(); this.deliveries.clear(); this.sent.clear(); this.commandCatalogs.clear(); this.commandFlights.clear(); this.catalog = undefined;
+    this.answers.clear(); this.deliveries.clear(); this.sent.clear(); this.stateRetries.clear(); this.commandCatalogs.clear(); this.commandFlights.clear(); this.catalog = undefined;
   }
 
   private async observeNativeProjections(sessionId: string, callbacks: FollowCallbacks, signal: AbortSignal, add: (subscription: AdapterSubscription) => void): Promise<void> {
@@ -293,13 +294,16 @@ export class DshWebAdapter implements WorkbenchAdapter {
       else this.notification(frame.event, frame.args);
     }, fault => { accept.failed(fault); if (accept.opened()) this.fail(fault); }));
   }
-  private async openWorkspaces(mux: RemoteMux): Promise<void> {
+  private async openWorkspaces(mux: RemoteMux): Promise<readonly WorkspaceBrief[]> {
+    let opening: readonly WorkspaceBrief[] | undefined;
     await awaitOpening(this.signal, accept => mux.subscribe(createReadRequest('workspace/follow'), 'directory', value => {
       const frame = parseWorkspaceFrame(value);
       if (!accept.opened() && frame.type !== 'baseline') throw new ProtocolFault('protocol');
       this.callbacks.workspaces(frame);
-      if (!accept.opened()) accept.ready();
+      if (!accept.opened() && frame.type === 'baseline') { opening = frame.value.items; accept.ready(); }
     }, fault => { accept.failed(fault); if (accept.opened()) this.fail(fault); }));
+    if (opening === undefined) throw new ProtocolFault('protocol');
+    return opening;
   }
   private notification(event: string, args: readonly unknown[]): void {
     if (event === 'api-session/status') {
@@ -308,7 +312,7 @@ export class DshWebAdapter implements WorkbenchAdapter {
       this.summaries = this.summaries.map(session => session.sessionId === args[0] ? { ...session, running: args[1] as boolean } : session);
     } else if (event === 'api-session/removed') {
       if (args.length !== 1) throw new ProtocolFault('protocol');
-      const id = requireId(args[0]); this.summaries = this.summaries.filter(session => session.sessionId !== id); this.callbacks.removed(id);
+      const id = requireId(args[0]); this.stateRetries.delete(id); this.summaries = this.summaries.filter(session => session.sessionId !== id); this.callbacks.removed(id);
     } else if (event === 'api-session/added' || event === 'api-session/activity') {
       void this.refreshSessions().catch(fault => this.fail(asFault(fault)));
     } else if (['llm/adapters-updated', 'llm/models-updated', 'settings/document-updated', 'credentials/record-updated', 'credentials/reference-updated'].includes(event)) {
@@ -322,6 +326,8 @@ export class DshWebAdapter implements WorkbenchAdapter {
     if (this.refreshPending !== undefined) return this.refreshPending;
     const work = (async () => {
       this.summaries = parseSessionList(await this.read(createReadRequest('session/list'), this.signal));
+      const ids = new Set(this.summaries.map(session => session.sessionId));
+      for (const id of this.stateRetries.keys()) if (!ids.has(id)) this.stateRetries.delete(id);
       this.callbacks.sessions(this.summaries);
     })();
     this.refreshPending = work;
@@ -334,19 +340,30 @@ export class DshWebAdapter implements WorkbenchAdapter {
   private async pollStates(): Promise<void> {
     if (!this.statePolling) return;
     const pending = this.interactions.all();
-    const queue = this.summaries.filter(session => session.agentAvailable || session.running
-      || pending.some(pending => pending.sessionId === session.sessionId));
+    const queue = this.summaries.filter(session => (session.agentAvailable || session.running
+      || pending.some(pending => pending.sessionId === session.sessionId)) && (this.stateRetries.get(session.sessionId)?.retryAt ?? 0) <= Date.now());
     let next = 0;
     const worker = async (): Promise<void> => {
       while (next < queue.length && !this.signal.aborted) {
         const session = queue[next++]; if (session === undefined) return;
         try {
           const state = parsePassiveState(await this.read(createReadRequest('session/state', { sessionId: session.sessionId }), this.signal));
+          if (this.signal.aborted || this.disposed) return;
+          if (!this.summaries.some(item => item.sessionId === session.sessionId)) continue;
+          this.stateRetries.delete(session.sessionId);
           this.callbacks.state(session.sessionId, state);
         } catch (error) {
+          if (this.signal.aborted || this.disposed) return;
+          if (!this.summaries.some(item => item.sessionId === session.sessionId)) continue;
           const fault = asFault(error);
-          if (fault.kind === 'not-found') { this.summaries = this.summaries.filter(item => item.sessionId !== session.sessionId); this.callbacks.removed(session.sessionId); continue; }
+          if (fault.kind === 'not-found') { this.stateRetries.delete(session.sessionId); this.summaries = this.summaries.filter(item => item.sessionId !== session.sessionId); this.callbacks.removed(session.sessionId); continue; }
           if (fault.kind === 'unsupported') { this.statePolling = false; return; }
+          if (fault.kind === 'network' || fault.kind === 'timeout') {
+            // 状态 HTTP 的局部抖动不等于认证 WS 失效，不能取消健康的正文／任务逻辑流。
+            const attempt = Math.min((this.stateRetries.get(session.sessionId)?.attempt ?? 0) + 1, 1000000);
+            this.stateRetries.set(session.sessionId, { attempt, retryAt: Date.now() + recoveryDelayMs(attempt) });
+            this.callbacks.stateFailed?.(session.sessionId, fault); continue;
+          }
           if (fault.kind !== 'cancelled') this.fail(fault);
           return;
         }
@@ -367,16 +384,16 @@ export class DshWebAdapter implements WorkbenchAdapter {
 }
 function asFault(error: unknown): ProtocolFault { return error instanceof ProtocolFault ? error : new ProtocolFault('protocol'); }
 interface OpeningAcceptor { opened(): boolean; ready(): void; failed(fault: ProtocolFault): void }
-function awaitOpening(signal: AbortSignal, subscribe: (accept: OpeningAcceptor) => AdapterSubscription): Promise<void> {
+function awaitOpening(signal: AbortSignal, subscribe: (accept: OpeningAcceptor) => ReadSubscription): Promise<void> {
   if (signal.aborted) return Promise.reject(new ProtocolFault('cancelled'));
   return new Promise((resolve, reject) => {
     let opened = false;
     let settled = false;
-    let subscription: AdapterSubscription | undefined;
+    let subscription: ReadSubscription | undefined;
     const finished = (fault?: ProtocolFault): void => {
       if (settled) return;
       settled = true; clearTimeout(timer); signal.removeEventListener('abort', aborted);
-      if (fault !== undefined) { subscription?.cancel(); reject(fault); } else resolve();
+      if (fault !== undefined) { subscription?.cancel(fault); reject(fault); } else resolve();
     };
     const aborted = (): void => finished(new ProtocolFault('cancelled'));
     const timer = setTimeout(() => finished(new ProtocolFault('timeout')), 15000);

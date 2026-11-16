@@ -153,7 +153,7 @@ export class WorkbenchService {
     const scope = { serverId: session.config.id, authProfileId: session.config.authProfileId, generation };
     this.beginScope(scope);
     const callbacks = this.callbacks(scope, fault => { carrierFailed(fault); this.handleFault(scope, fault); });
-    const adapter = new DshWebAdapter(scope, session.businessTransport(signal), callbacks, signal);
+    const adapter = new DshWebAdapter(scope, session.businessTransport(signal, generation), callbacks, signal);
     const files = new FileShareReader((request, active) => session.readFileShare(request, active), signal);
     this.bindings.set(scope.serverId, { adapter, scope, signal, files });
     this.changed();
@@ -489,9 +489,14 @@ export class WorkbenchService {
       state: (sessionId, state) => {
         if (!this.scopeCurrent(scope)) return;
         const pending = this.pending.get(scope.serverId)?.filter(item => item.sessionId === sessionId).map(item => item.id) ?? [];
-        this.state.setState(scope, sessionId, { cursor: state.cursor, active: state.active, running: state.running,
+        const changed = this.state.setState(scope, sessionId, { cursor: state.cursor, active: state.active, running: state.running,
           pendingIds: pending.length > 0 ? pending : state.pendingInput.map((kind, index) => `state:${kind}:${index}`) });
-        this.primeRead(scope, sessionId, state.cursor); this.changed();
+        this.primeRead(scope, sessionId, state.cursor); if (changed) this.changed();
+      },
+      stateFailed: (sessionId, fault) => {
+        if (!this.scopeCurrent(scope)) return;
+        if (this.state.markSessionStale(scope, sessionId)) this.changed();
+        this.logger?.fault('read-failed', fault, { serverId: scope.serverId, generation: scope.generation, endpoint: 'session/state' });
       },
       pending: pending => {
         if (!this.scopeCurrent(scope)) return;
@@ -543,7 +548,7 @@ export class WorkbenchService {
   private foregroundFailed(foreground: Foreground, error: unknown): void {
     if (this.foreground !== foreground || foreground.controller.signal.aborted || !this.scopeCurrent(foreground.context)) return;
     const failure = toPublicFailure(error); if (failure.kind === 'cancelled') return;
-    this.bodyFailed(foreground.context, error);
+    this.bodyFailed(foreground.context, error, 'session/follow');
     if (!['network', 'timeout'].includes(failure.kind) || this.currentIsWebOwned(foreground.context)) { this.clearForegroundRecovery(); if (this.foreground === foreground) this.stopForeground(); return; }
     const binding = this.bindings.get(foreground.context.serverId);
     if (binding === undefined || binding.signal.aborted || this.suspendedDetails.has(foreground.context.serverId)) return;
@@ -703,11 +708,11 @@ export class WorkbenchService {
   private logRecovery(serverId: string, generation: number, target: 'server' | 'conversation', phase: 'waiting' | 'connecting' | 'stopped' | 'ready' | 'cancelled', attempt: number, delay = 0): void {
     this.logger?.record('info', 'reconnect-state', { serverId, generation, recoveryTarget: target, recoveryPhase: phase, retryAttempt: attempt, retryDelayMs: delay });
   }
-  private bodyFailed(context: SessionContext, error: unknown): void {
+  private bodyFailed(context: SessionContext, error: unknown, endpoint?: string): void {
     if (!this.scopeCurrent(context)) return;
     const failure = toPublicFailure(error);
     if (failure.kind === 'cancelled') return;
-    this.logger?.fault('read-failed', error, { serverId: context.serverId, generation: context.generation });
+    this.logger?.fault('read-failed', error, { serverId: context.serverId, generation: context.generation, ...(endpoint === undefined ? {} : { endpoint }) });
     this.failures.set(this.pref(context), failure);
     if (['forbidden', 'auth-required', 'login-response'].includes(failure.kind)) {
       this.directory.removeSession(context, context.sessionId); this.state.revoke(context, context.sessionId);
@@ -718,7 +723,8 @@ export class WorkbenchService {
   }
   private jobBinding(context: SessionContext): WorkbenchAdapter {
     if (this.disposed) throw new ProtocolFault('cancelled');
-    this.assertSelected(context); const binding = this.binding(context);
+    // 先判定连接代次是否仍有效，再验证目录路由；恢复中的旧续租是取消，不是撤权。
+    const binding = this.binding(context); this.assertSelected(context);
     if (binding.adapter.source !== 'live' || this.suspendedDetails.has(context.serverId)) throw new ProtocolFault('unsupported');
     return binding.adapter;
   }

@@ -64,9 +64,9 @@ export class ServerSession {
 
   ready(signal?: AbortSignal): Promise<void> { return signal === undefined ? this.networkReady : waitForSignal(this.networkReady, signal); }
 
-  transport(lifetime: AbortSignal): PocTransport { return this.createTransport(lifetime, false); }
+  transport(lifetime: AbortSignal, generation?: number): PocTransport { return this.createTransport(lifetime, false, generation); }
 
-  businessTransport(lifetime: AbortSignal): PocTransport { return this.createTransport(lifetime, true); }
+  businessTransport(lifetime: AbortSignal, generation?: number): PocTransport { return this.createTransport(lifetime, true, generation); }
 
   /** 独立只读插件通道；不暴露原始 URL、写方法或认证材料给 renderer。 */
   async readFileShare(request: FileShareRequest, signal: AbortSignal): Promise<Response> {
@@ -134,10 +134,22 @@ export class ServerSession {
     return () => { this.compatibilityContents.delete(webContentsId); };
   }
 
-  private createTransport(lifetime: AbortSignal, business: boolean): PocTransport {
-    // 每次连接只记录首个 HTTP 成功路径，后台轮询不持续填满诊断历史。
-    let firstRequest = true;
+  private createTransport(lifetime: AbortSignal, business: boolean, generation?: number): PocTransport {
+    // 每次连接只记录首个 HTTP 成功路径与各类逻辑流首次开场，后台轮询不持续填满诊断历史。
+    let firstRequest = true; const reportedStreams = new Set<string>();
     return {
+      streamDiagnostic: value => {
+        if (generation !== undefined && value.generation !== generation) return;
+        const key = `${value.endpoint}:${value.role}:${value.state}`;
+        if (value.state === 'begin' || value.state === 'open') {
+          if (reportedStreams.has(key)) return;
+          reportedStreams.add(key);
+        }
+        this.recordTransport('ws-stream', value.state, { ...navigationFields(this.baseUrl.href, this.config.baseUrl),
+          networkProtocol: this.baseUrl.protocol === 'https:' ? 'wss:' : 'ws:', proxyPolicy: this.config.proxyMode ?? 'system',
+          generation: value.generation, endpoint: value.endpoint, streamRole: value.role,
+          ...(value.elapsedMs <= 30000 ? { elapsedMs: value.elapsedMs } : {}), ...(value.failureKind === undefined ? {} : { failureKind: value.failureKind }) });
+      },
       fetch: async (input, init) => {
         const target = new URL(input, this.baseUrl);
         if (target.origin !== this.baseUrl.origin || init.method !== 'POST' || typeof init.body !== 'string') throw new ProtocolFault('forbidden');
@@ -154,7 +166,8 @@ export class ServerSession {
         let authorization = this.credentials.authorizationFor(this.config.authProfileId, target.href);
         if (authorization !== undefined) headers.set('authorization', authorization);
         const initial = firstRequest; firstRequest = false;
-        const fields: LogFields = { endpoint: String(envelope.method), ...navigationFields(target.href, this.config.baseUrl), proxyPolicy: this.config.proxyMode ?? 'system' };
+        const fields: LogFields = { endpoint: String(envelope.method), ...navigationFields(target.href, this.config.baseUrl), proxyPolicy: this.config.proxyMode ?? 'system',
+          ...(generation === undefined ? {} : { generation }) };
         let step: ConnectionStep = 'http-proxy';
         try {
           if (signal.aborted) throw faultForAbort(signal);
@@ -226,17 +239,18 @@ export class ServerSession {
           throw fault;
         } finally { release(); }
       },
-      openWebSocket: signal => this.openWebSocket(AbortSignal.any([lifetime, signal])),
+      openWebSocket: signal => this.openWebSocket(AbortSignal.any([lifetime, signal]), generation),
     };
   }
 
-  private async openWebSocket(signal: AbortSignal): Promise<WebSocket> {
+  private async openWebSocket(signal: AbortSignal, generation?: number): Promise<WebSocket> {
     if (signal.aborted) throw faultForAbort(signal);
     const httpUrl = new URL(REMOTE_STREAM_MUX_PATH.slice(1), this.baseUrl);
     const wsUrl = new URL(httpUrl);
     const protocol = httpUrl.protocol === 'https:' ? 'wss:' : 'ws:';
     wsUrl.protocol = protocol;
-    const fields: LogFields = { ...navigationFields(httpUrl.href, this.config.baseUrl), networkProtocol: protocol, proxyPolicy: this.config.proxyMode ?? 'system' };
+    const fields: LogFields = { ...navigationFields(httpUrl.href, this.config.baseUrl), networkProtocol: protocol, proxyPolicy: this.config.proxyMode ?? 'system',
+      ...(generation === undefined ? {} : { generation }) };
     let step: ConnectionStep = 'ws-proxy';
     try {
       // Node WS 不自动继承 Chromium 的代理；不偷偷绕过系统代理直连。
@@ -262,7 +276,8 @@ export class ServerSession {
         const currentHeaders = { ...headers, ...(authorization === undefined ? {} : { Authorization: authorization }) };
         this.recordTransport(step, 'begin', fields);
         const socket = new WebSocket(wsUrl.href, {
-          headers: currentHeaders, followRedirects: false, perMessageDeflate: false,
+          // 支持时逐消息压缩，不复用上下文；服务端不协商时继续普通文本帧。
+          headers: currentHeaders, followRedirects: false, perMessageDeflate: { clientNoContextTakeover: true, serverNoContextTakeover: true },
           maxPayload: MAX_RESPONSE_BYTES, ...(httpUrl.protocol === 'https:' ? tlsOptions() : {}),
         });
         let connected = false; let connectedAt = 0;
@@ -281,7 +296,8 @@ export class ServerSession {
         try {
           await waitForWebSocket(socket, openingSignal);
           if (signal.aborted) { aborted(); throw faultForAbort(signal); }
-          connected = true; connectedAt = performance.now(); this.recordTransport('ws-handshake', 'open', { ...fields, httpStatus: 101 });
+          connected = true; connectedAt = performance.now(); this.recordTransport('ws-handshake', 'open', { ...fields, httpStatus: 101,
+            wsCompression: socket.extensions.split(',').some(extension => extension.trim() === 'permessage-deflate') });
           return socket;
         } catch (error) {
           if (error instanceof SocketHandshakeFault) {

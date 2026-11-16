@@ -7,6 +7,8 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { ProtocolFault } from '../../shared/faults.js';
 import { DEFAULT_PET_DISPLAY, petWindowGeometry } from '../../shared/pet-display.js';
+import { PET_DRAG_MAX_MS, PetDragState, parsePetDragRequest } from '../../shared/pet-drag.js';
+import type { PetPoint } from '../../shared/pet-drag.js';
 import type { PetDisplaySettings } from '../../shared/pet-display.js';
 import { PET_APP_SCHEME, PET_ASSET_SCHEME, PET_PAGE_URL } from '../../shared/pet-view.js';
 import type { PetViewConfig, PetViewSnapshot } from '../../shared/pet-view.js';
@@ -42,11 +44,13 @@ export class PetWindow {
   private hostFullscreen = false;
   private theme: 'system' | 'light' | 'dark' = 'system';
   private moveTimer: ReturnType<typeof setTimeout> | undefined;
+  private dragTimer: ReturnType<typeof setTimeout> | undefined;
+  private readonly dragState = new PetDragState();
   private startupTimer: ReturnType<typeof setTimeout> | undefined;
   private lastSoundAt = -Infinity;
   private programmaticPosition: { x: number; y: number } | undefined;
   private programmaticUntil = 0;
-  private readonly displayChanged = (): void => { this.geometryKey = ''; this.applyConfig(); };
+  private readonly displayChanged = (): void => { if (this.window !== undefined) this.finishDrag(this.window); this.geometryKey = ''; this.applyConfig(); };
   private readonly themeChanged = (): void => { this.applyConfig(); };
 
   constructor(private readonly assets: WindowAssets, private readonly ipc: IpcRegistry, private readonly hooks: PetWindowHooks, private readonly logger?: DiagnosticLogger) {
@@ -79,7 +83,11 @@ export class PetWindow {
   active(): boolean { return this.window !== undefined && !this.window.isDestroyed(); }
   configure(settings: PetDisplaySettings, theme: 'system' | 'light' | 'dark'): void {
     if (theme === this.theme && JSON.stringify(settings) === JSON.stringify(this.config.settings)) return;
-    this.theme = theme; this.config = { ...this.config, settings }; this.applyConfig();
+    const previous = this.config.settings;
+    const changedGeometry = settings.size !== previous.size || settings.position?.x !== previous.position?.x || settings.position?.y !== previous.position?.y;
+    // 改大小／重置位置遵循新偏好；仅改锁定或显示项时保留已经拖到的位置。
+    const position = this.window === undefined ? undefined : this.finishDrag(this.window, undefined, !changedGeometry);
+    this.theme = theme; this.config = { ...this.config, settings: position === undefined ? settings : { ...settings, position } }; this.applyConfig();
   }
   fullscreen(value: boolean): void { this.hostFullscreen = value; this.applyConfig(); }
   async setAsset(asset: PetAsset): Promise<void> {
@@ -126,8 +134,10 @@ export class PetWindow {
       'pet:mouse-interactive': value => {
         if (typeof value !== 'boolean') throw new ProtocolFault('protocol');
         if (this.window !== win || win.isDestroyed()) throw new ProtocolFault('cancelled');
-        win.setIgnoreMouseEvents(!value, { forward: true });
+        const interactive = this.rendererReady && this.config.visible && (this.dragState.matches() || value);
+        win.setIgnoreMouseEvents(!interactive, { forward: true });
       },
+      'pet:drag': value => this.drag(win, value),
       'pet:action': value => {
         if (this.window !== win || !this.rendererReady || win.isDestroyed()) throw new ProtocolFault('cancelled');
         return this.hooks.action(value);
@@ -171,6 +181,7 @@ export class PetWindow {
       theme: this.theme === 'system' ? nativeTheme.shouldUseDarkColors ? 'dark' : 'light' : this.theme,
       pet: this.asset === undefined ? null : { ...this.asset, spritePath: `${PET_ASSET_SCHEME}://sprite/current?v=${this.spriteRevision}` } };
     if (win === undefined || win.isDestroyed()) return;
+    if (this.config.settings.lockPosition || !this.config.visible) this.finishDrag(win);
     const position = this.config.settings.position;
     const display = position === null ? screen.getPrimaryDisplay() : screen.getDisplayNearestPoint(position);
     const geometry = petWindowGeometry(this.config.settings, display.workArea); const key = JSON.stringify([this.config.settings.size, position, display.id, display.workArea]);
@@ -182,30 +193,82 @@ export class PetWindow {
       win.webContents.setZoomFactor(geometry.scale);
     }
     win.setAlwaysOnTop(this.config.settings.alwaysOnTop, 'floating'); win.setMovable(!this.config.settings.lockPosition);
-    if (this.rendererReady && this.config.visible) win.showInactive(); else { win.setIgnoreMouseEvents(true, { forward: true }); win.hide(); }
+    if (this.rendererReady && this.config.visible) { if (!win.isVisible()) win.showInactive(); }
+    else { win.setIgnoreMouseEvents(true, { forward: true }); win.hide(); }
     if (this.rendererReady) win.webContents.send('pet:config', this.config);
   }
+  private drag(win: BrowserWindow, value: unknown): boolean {
+    const command = parsePetDragRequest(value);
+    if (this.window !== win || win.isDestroyed() || !this.rendererReady) throw new ProtocolFault('cancelled');
+    try {
+      if (command.phase === 'end') {
+        // 松开时取最后一个真实桌面点，补上尚未发出的动画帧；旧手势不能结束新手势。
+        if (!this.config.settings.lockPosition && this.config.visible) this.updateDrag(win, command.gestureId);
+        this.finishDrag(win, command.gestureId); return false;
+      }
+      if (this.config.settings.lockPosition || !this.config.visible) { this.finishDrag(win); return false; }
+      if (command.phase === 'start') {
+        if (this.dragState.matches(command.gestureId)) return true;
+        this.finishDrag(win);
+        const { x, y } = win.getBounds();
+        this.dragState.begin(command.gestureId, { x, y }, screen.getCursorScreenPoint(), performance.now(), true);
+        clearTimeout(this.moveTimer); this.moveTimer = undefined;
+        win.setIgnoreMouseEvents(false);
+        this.dragTimer = setTimeout(() => this.finishDrag(win, command.gestureId), PET_DRAG_MAX_MS);
+        return true;
+      }
+      return this.updateDrag(win, command.gestureId);
+    } catch (error) { this.finishDrag(win, command.gestureId, false); throw error; }
+  }
+  private updateDrag(win: BrowserWindow, gestureId: string): boolean {
+    if (!this.dragState.matches(gestureId)) return false;
+    const position = this.dragState.move(gestureId, screen.getCursorScreenPoint(), performance.now());
+    if (position === undefined) { this.finishDrag(win, gestureId); return false; }
+    const bounds = win.getBounds();
+    if (bounds.x !== position.x || bounds.y !== position.y) win.setPosition(position.x, position.y, false);
+    return true;
+  }
+  private finishDrag(win: BrowserWindow, gestureId?: string, save = true): PetPoint | undefined {
+    const ended = this.dragState.end(gestureId); if (ended === undefined) return undefined;
+    clearTimeout(this.dragTimer); this.dragTimer = undefined;
+    if (this.window !== win || win.isDestroyed()) return undefined;
+    let position: PetPoint | undefined;
+    try { if (save) position = this.settlePosition(win); }
+    catch (error) { this.logger?.fault('window-state-failed', error); }
+    if (this.rendererReady) { win.webContents.send('pet:drag-ended', ended); win.webContents.send('pet:config', this.config); }
+    return position;
+  }
+  private settlePosition(win: BrowserWindow): PetPoint {
+    const bounds = win.getBounds(); const { x, y } = bounds;
+    const geometry = petWindowGeometry({ ...this.config.settings, position: { x, y } }, screen.getDisplayMatching(bounds).workArea);
+    const position = { x: geometry.bounds.x, y: geometry.bounds.y };
+    this.programmaticPosition = position; this.programmaticUntil = Date.now() + 1000;
+    win.setBounds(geometry.bounds, false); win.webContents.setZoomFactor(geometry.scale);
+    this.savePosition(position);
+    this.config = { ...this.config, settings: { ...this.config.settings, position } };
+    this.geometryKey = ''; return position;
+  }
   private moved(win: BrowserWindow): void {
-    if (this.window !== win || win.isDestroyed() || this.config.settings.lockPosition) return;
+    if (this.window !== win || win.isDestroyed() || this.config.settings.lockPosition || this.dragState.matches()) return;
     const { x, y } = win.getBounds(); const expected = this.programmaticPosition;
     if (expected !== undefined && Date.now() < this.programmaticUntil && Math.abs(expected.x - x) <= 2 && Math.abs(expected.y - y) <= 2) return;
     this.programmaticPosition = undefined; clearTimeout(this.moveTimer);
     this.moveTimer = setTimeout(() => {
-      this.moveTimer = undefined; if (this.window !== win || win.isDestroyed()) return;
-      const bounds = win.getBounds(); const { x, y } = bounds;
-      const geometry = petWindowGeometry({ ...this.config.settings, position: { x, y } }, screen.getDisplayMatching(bounds).workArea);
-      this.programmaticPosition = { x: geometry.bounds.x, y: geometry.bounds.y }; this.programmaticUntil = Date.now() + 1000;
-      win.setBounds(geometry.bounds, false); win.webContents.setZoomFactor(geometry.scale);
-      this.savePosition({ x: geometry.bounds.x, y: geometry.bounds.y });
+      this.moveTimer = undefined; if (this.window !== win || win.isDestroyed() || this.dragState.matches()) return;
+      this.settlePosition(win);
     }, 150);
   }
   private capturePosition(): void {
     const win = this.window; if (win === undefined || win.isDestroyed()) return;
+    this.finishDrag(win);
     const { x, y } = win.getBounds(); this.savePosition({ x, y });
   }
   private savePosition(position: { x: number; y: number }): void {
     if (this.config.settings.position?.x === position.x && this.config.settings.position.y === position.y) return;
     void this.hooks.position(position).catch(error => this.logger?.fault('window-state-failed', error));
   }
-  private clearTimers(): void { clearTimeout(this.moveTimer); clearTimeout(this.startupTimer); this.moveTimer = undefined; this.startupTimer = undefined; }
+  private clearTimers(): void {
+    clearTimeout(this.moveTimer); clearTimeout(this.dragTimer); clearTimeout(this.startupTimer);
+    this.moveTimer = undefined; this.dragTimer = undefined; this.startupTimer = undefined; this.dragState.end();
+  }
 }

@@ -9,12 +9,23 @@ import { assertReadRequest } from './read-policy.js';
 import type { ReadRequest } from './read-policy.js';
 
 export type StreamRole = 'directory' | 'detail' | 'state';
+export interface StreamDiagnostic {
+  readonly generation: number;
+  readonly endpoint: string;
+  readonly role: StreamRole;
+  readonly state: 'begin' | 'open' | 'failed' | 'cancelled';
+  readonly elapsedMs: number;
+  readonly failureKind?: ProtocolFault['kind'];
+}
 interface Subscription {
   readonly role: StreamRole;
+  readonly endpoint: string;
+  readonly startedAt: number;
+  opened: boolean;
   readonly unregister: () => void;
   readonly failed: (fault: ProtocolFault) => void;
 }
-export interface ReadSubscription { cancel(): void }
+export interface ReadSubscription { cancel(fault?: ProtocolFault): void }
 
 /** 一条认证物理 WS 上仅开放只读逻辑流；周期读取不会关闭物理 WS。 */
 export class ReadOnlyMux {
@@ -30,6 +41,7 @@ export class ReadOnlyMux {
     private readonly generation: number,
     private readonly onBytes: (role: StreamRole, bytes: number, item: boolean) => void = () => {},
     private readonly onClosed: (fault: ProtocolFault) => void = () => {},
+    private readonly onDiagnostic: (value: StreamDiagnostic) => void = () => {},
   ) {
     this.router.beginGeneration(generation);
     this.ready = new Promise((resolve, reject) => { this.resolveReady = resolve; this.rejectReady = reject; });
@@ -76,23 +88,28 @@ export class ReadOnlyMux {
   protected subscribeTrusted(request: { readonly endpoint: string; readonly payload: unknown }, role: StreamRole, item: (value: unknown) => void, failed: (fault: ProtocolFault) => void): ReadSubscription {
     if (this.closed || this.socket.readyState !== WebSocket.OPEN) throw new ProtocolFault('network');
     const streamId = randomUUID();
-    const cancel = (): void => this.cancel(streamId);
+    const cancel = (fault?: ProtocolFault): void => this.cancel(streamId, fault);
     const unregister = this.router.register(streamId, this.generation, frame => {
+      const subscription = this.subscriptions.get(streamId); if (subscription === undefined) return;
       if (frame.type === 'item') {
+        if (!subscription.opened) { subscription.opened = true; this.diagnose(subscription, 'open'); }
         try { item(frame.value); }
         catch (error) {
-          cancel();
-          failed(error instanceof ProtocolFault ? error : new ProtocolFault('protocol'));
+          const fault = error instanceof ProtocolFault ? error : new ProtocolFault('protocol');
+          cancel(fault); failed(fault);
         }
       } else {
+        const fault = frame.type === 'error' ? remoteFault(frame.error.code) : new ProtocolFault('network');
+        this.diagnose(subscription, fault.kind === 'cancelled' ? 'cancelled' : 'failed', fault);
         this.subscriptions.delete(streamId);
-        unregister();
-        failed(frame.type === 'error' ? remoteFault(frame.error.code) : new ProtocolFault('network'));
+        unregister(); failed(fault);
       }
     });
-    this.subscriptions.set(streamId, { role, unregister, failed });
+    const subscription: Subscription = { role, endpoint: request.endpoint, startedAt: performance.now(), opened: false, unregister, failed };
+    this.subscriptions.set(streamId, subscription); this.diagnose(subscription, 'begin');
     try { this.send({ type: 'open', streamId, endpoint: request.endpoint, payload: request.payload }); }
     catch {
+      if (this.subscriptions.has(streamId)) this.diagnose(subscription, 'failed', new ProtocolFault('network'));
       this.subscriptions.delete(streamId);
       unregister();
       throw new ProtocolFault('network');
@@ -110,7 +127,7 @@ export class ReadOnlyMux {
         settled = true;
         clearTimeout(timer);
         signal.removeEventListener('abort', aborted);
-        subscription?.cancel();
+        subscription?.cancel(fault);
         if (fault !== undefined) reject(fault); else resolve(value);
       };
       const aborted = (): void => finish(undefined, new ProtocolFault('cancelled'));
@@ -146,9 +163,11 @@ export class ReadOnlyMux {
     }
   }
 
-  private cancel(streamId: string): void {
+  private cancel(streamId: string, fault?: ProtocolFault): void {
     const subscription = this.subscriptions.get(streamId);
     if (subscription === undefined) return;
+    // 正常尾部采样收尾不刷日志；开场尚未收到帧的取消仍留下端点与耗时。
+    if (!subscription.opened || fault !== undefined) this.diagnose(subscription, fault === undefined || fault.kind === 'cancelled' ? 'cancelled' : 'failed', fault);
     this.subscriptions.delete(streamId);
     subscription.unregister();
     if (!this.closed && this.socket.readyState === WebSocket.OPEN) this.send({ type: 'cancel', streamId });
@@ -172,8 +191,17 @@ export class ReadOnlyMux {
     const pending = [...this.subscriptions.values()];
     this.subscriptions.clear();
     for (const subscription of pending) {
+      if (fault.kind !== 'cancelled' || !subscription.opened) this.diagnose(subscription, fault.kind === 'cancelled' ? 'cancelled' : 'failed', fault);
       subscription.unregister();
       try { subscription.failed(fault); } catch { /* 单个消费方不能阻止其他读取释放。 */ }
     }
+  }
+
+  /** 只交付本地端点与生命周期元信息，不把 payload、帧、streamId 或会话身份交给日志。 */
+  private diagnose(subscription: Subscription, state: StreamDiagnostic['state'], fault?: ProtocolFault): void {
+    try {
+      this.onDiagnostic({ generation: this.generation, endpoint: subscription.endpoint, role: subscription.role, state,
+        elapsedMs: Math.max(0, Math.round(performance.now() - subscription.startedAt)), ...(fault === undefined ? {} : { failureKind: fault.kind }) });
+    } catch { /* 诊断消费方失败不能改变物理连接或业务流。 */ }
   }
 }

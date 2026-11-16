@@ -6,8 +6,11 @@
 * { box-sizing: border-box; } html, body { width: 380px; min-height: 540px; margin: 0; overflow: hidden; background: transparent; } body { color: var(--text); user-select: none; }
 button { font: inherit; color: inherit; letter-spacing: 0; } button:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; } button:disabled { opacity: .45; cursor: default; }
 #app { position: relative; width: 380px; height: 540px; padding: 8px; overflow: hidden; }
-.pet-shell { position: absolute; right: 8px; bottom: 8px; width: 232px; height: 260px; -webkit-app-region: drag; }
-.pet { position: absolute; right: 0; bottom: 0; width: 232px; height: 252px; border: 0; background: transparent; -webkit-app-region: drag; }
+/* 普通指针事件驱动受限拖动接口；原生 drag 区会吞掉用来关闭鼠标穿透的事件。 */
+.pet-shell { position: absolute; right: 8px; bottom: 8px; width: 232px; height: 260px; -webkit-app-region: no-drag; }
+.pet { position: absolute; right: 0; bottom: 0; width: 232px; height: 252px; border: 0; background: transparent; cursor: grab; touch-action: none; -webkit-app-region: no-drag; }
+:root.pet-position-locked .pet { cursor: default; }
+:root.pet-position-dragging .pet { cursor: grabbing; }
 .pet.missing { display: grid; place-items: center; width: 210px; height: 72px; padding: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); cursor: pointer; -webkit-app-region: no-drag; }
 .sprite-viewport { position: absolute; left: 20px; top: 20px; width: 192px; height: 208px; overflow: hidden; filter: drop-shadow(0 8px 8px rgba(0,0,0,.28)); }
 /* CSP 只允许受控样式表：用静态行／帧 class，而非内联样式。 */

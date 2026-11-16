@@ -222,7 +222,7 @@ function commandMenu(window: BrowserWindow, state: { webReady: boolean; webOpen:
     const item = (label: string, command: WorkbenchCommand, enabled = true): MenuItemConstructorOptions => ({ label, enabled, click: () => { picked = command; } });
     const menu = Menu.buildFromTemplate([
       item('设置', 'settings'), item('添加服务器', 'add-server'), { type: 'separator' },
-      item('日志', 'logs'), item('复制诊断', 'copy-diagnostics'), item('许可与源码', 'licenses'), { type: 'separator' },
+      item('日志', 'logs'), item('复制诊断', 'copy-diagnostics'), { type: 'separator' },
       item('缓存原网页（脱敏功能区）', 'cache-layout', state.webReady), item('打开功能区快照目录', 'layout-folder'),
       item('显示／隐藏原网页侧栏', 'toggle-web-sidebar', state.webReady), item('关闭兼容页', 'close-web', state.webOpen),
       { type: 'separator' }, item('断开服务器', 'disconnect', state.hasServer),

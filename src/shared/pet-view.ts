@@ -3,6 +3,7 @@
 import type { IpcResult } from './contracts.js';
 import type { TaskColor } from './domain.js';
 import type { PetDisplaySettings } from './pet-display.js';
+import type { PetDragRequest } from './pet-drag.js';
 import { ProtocolFault, requireId, requireKeys, requireRecord } from './faults.js';
 
 export const PET_APP_SCHEME = 'dshdeck-pet-app';
@@ -47,7 +48,9 @@ export function parseNativePetAction(value: unknown, snapshotRevision: number): 
 export interface PetBridge {
   ready(): Promise<IpcResult<{ readonly config: PetViewConfig; readonly snapshot: PetViewSnapshot }>>;
   setMouseInteractive(interactive: boolean): Promise<IpcResult<void>>;
+  drag(input: PetDragRequest): Promise<IpcResult<boolean>>;
   action(input: NativePetAction): Promise<IpcResult<void>>;
+  onDragEnded(listener: (gestureId: string) => void): () => void;
   onConfig(listener: (config: PetViewConfig) => void): () => void;
   onSnapshot(listener: (snapshot: PetViewSnapshot) => void): () => void;
 }

@@ -4,12 +4,13 @@ import type { ProbeSampleInput, ProbeSampleResult, SessionBrief, WorkspaceBrief 
 import { ProtocolFault, requireId, requireKeys, requireRecord } from '../../src/shared/faults.js';
 import { ReadOnlyRpc } from '../../src/main/protocol/read-only-rpc.js';
 import { ReadOnlyMux } from '../../src/main/protocol/read-only-mux.js';
-import type { ReadSubscription } from '../../src/main/protocol/read-only-mux.js';
+import type { ReadSubscription, StreamDiagnostic } from '../../src/main/protocol/read-only-mux.js';
 import { createReadRequest } from '../../src/main/protocol/read-policy.js';
 import { parseSessionList, parseSessionSnapshotSummary, parseWorkspaceFrame } from '../../src/main/protocol/read-values.js';
 
 export interface PocTransport {
   readonly fetch: RpcFetch;
+  readonly streamDiagnostic?: (value: StreamDiagnostic) => void;
   openWebSocket(signal: AbortSignal): Promise<WebSocket>;
 }
 interface Counters {
@@ -53,7 +54,7 @@ export class ProtocolProbe {
       if (counters === undefined) return;
       if (role === 'detail') { counters.detailTextBytes += bytes; if (item) counters.detailItems++; }
       if (role === 'state') { counters.stateTextBytes += bytes; if (item) counters.stateItems++; }
-    }, this.carrierFailed);
+    }, this.carrierFailed, value => this.transport.streamDiagnostic?.(value));
     const opening = parseWorkspaceFrame(await this.mux.readOpening(createReadRequest('workspace/follow'), 'directory', this.lifetime));
     if (opening.type !== 'baseline') throw new ProtocolFault('protocol');
     if (this.lifetime.aborted) throw new ProtocolFault('cancelled');

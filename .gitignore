@@ -13,6 +13,7 @@ tests/
 
 # 本地日志、敏感配置和系统杂项。
 window-state.json
+connection-intents.json
 *.log
 .env
 .env.*

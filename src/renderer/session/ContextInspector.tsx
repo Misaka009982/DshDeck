@@ -1,6 +1,8 @@
 import { useEffect, useRef } from 'react';
 import { contextOccupancy, tokenTotals } from '../../shared/native-controls.js';
 import type { NativeSnapshot } from '../../shared/native-controls.js';
+import { WorkbenchIcon } from '../ui/WorkbenchIcon.js';
+import { compactCount } from './composer-model.js';
 
 interface Props { readonly native: NativeSnapshot | undefined; readonly open: boolean; readonly setOpen: (open: boolean) => void }
 export function ContextInspector({ native, open, setOpen }: Props) {
@@ -15,16 +17,15 @@ export function ContextInspector({ native, open, setOpen }: Props) {
     return () => { window.removeEventListener('pointerdown', outside); window.removeEventListener('keydown', escape); };
   }, [open]);
   return <div className="context-inspector" ref={root}>
-    <button type="button" className="composer-option context-reading" aria-expanded={open} aria-haspopup="dialog" onClick={() => setOpen(!open)}
-      title="当前上下文来自服务器 contextPressure；累计 Token 另列，不用于冒充当前上下文。">{occupancy === null ? '上下文未知' : `上下文 ≈ ${occupancy.percent}%`}</button>
     <div className="session-stat-readings" aria-label="当前会话统计">
-      {stats !== undefined && <span title="完整会话已结束模型步骤的统计">{count(stats.turns)} 轮 · {count(stats.steps)} 步</span>}
-      {speed !== null && <span title="有记录解码耗时的步骤平均输出速度">{speed.toLocaleString('zh-CN', { maximumFractionDigits: 1 })} Token/s</span>}
-      {usage !== null && <span title="整会话累计账单，不是当前上下文">{count(usage.total)} Token</span>}
-      {usage?.cacheHit !== null && usage?.cacheHit !== undefined && <span title="累计缓存读取 / 累计全部输入">缓存 {percent(usage.cacheHit)}%</span>}
+      {(stats !== undefined || speed !== null) && <span className="session-stat-group" title="完整会话已结束模型步骤的统计；速度是有解码耗时记录的步骤平均值"><WorkbenchIcon name="clock" size={13} />{stats !== undefined && <span>{compactCount(stats.turns)} 轮 {compactCount(stats.steps)} 步</span>}{speed !== null && <span>· {speed.toLocaleString('zh-CN', { maximumFractionDigits: 1 })} tok/s</span>}</span>}
+      {usage !== null && <span className="session-stat-group" title={`整会话累计账单 ${count(usage.total)} Token，不是当前上下文`}><WorkbenchIcon name="database" size={13} /><span>累计 {compactCount(usage.total)} tok</span>{usage.cacheHit !== null && <span>· 缓存 {percent(usage.cacheHit)}%</span>}</span>}
+      {native?.state === 'stale' && <span className="session-stat-stale" title="保留上次元信息，等待只读连接恢复">缓存已过期</span>}
     </div>
+    <button type="button" className="composer-option context-reading" aria-expanded={open} aria-haspopup="dialog" onClick={() => setOpen(!open)}
+      title="当前上下文来自服务器 contextPressure，非原子近似值；点击查看详情。累计 Token 另列，不冒充当前上下文。"><span className={`context-ring ${occupancy === null ? 'is-unknown' : ''}`} aria-hidden="true" style={occupancy === null ? undefined : { background: `conic-gradient(var(--primary) ${occupancy.percent}%, var(--border) 0)` }} /><span>{occupancy === null ? '上下文未知' : `≈ ${occupancy.percent}%`}</span></button>
     {open && <div className="native-popover context-popover" role="dialog" aria-label="上下文与会话统计">
-      <header><strong>上下文与统计</strong><button type="button" onClick={() => setOpen(false)} aria-label="关闭上下文详情">×</button></header>
+      <header><strong>上下文与统计</strong><button type="button" className="icon-button" onClick={() => setOpen(false)} aria-label="关闭上下文详情"><WorkbenchIcon name="close" size={15} /></button></header>
       <section><h4>当前上下文（近似）</h4>
         {occupancy === null ? <p className="muted">服务器未提供完整分子和容量，不能计算当前占用。</p> : <>
           <div className="context-meter" role="progressbar" aria-label="近似上下文用量" aria-valuemin={0} aria-valuemax={100} aria-valuenow={occupancy.percent}><span style={{ width: `${occupancy.percent}%` }} /></div>

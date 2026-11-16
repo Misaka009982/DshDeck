@@ -4,6 +4,7 @@ import { normalizeServerInput } from '../../shared/server-config.js';
 import { ServerStore } from '../config/server-store.js';
 import type { ServerSession } from './server-session.js';
 import { ProtocolProbe, validateSampleInput } from '../../../tools/poc/protocol-probe.js';
+import type { NetworkCheckReport } from '../../shared/network-check.js';
 
 export interface AuthWindowHandle { focus(): void; close(): void }
 export interface AuthWindowCallbacks {
@@ -25,6 +26,7 @@ interface ServerRuntime {
   state: ConnectionState;
   generation: number;
   controller: AbortController | undefined;
+  inspection: AbortController | undefined;
   probe: ProbeHandle | undefined;
   browser: AuthWindowHandle | undefined;
   workspaces: readonly WorkspaceBrief[];
@@ -172,6 +174,17 @@ export class AuthService {
     return this.snapshot(runtime);
   }
 
+  async checkNetwork(id: string): Promise<NetworkCheckReport> {
+    const runtime = this.get(id);
+    if (runtime.browser !== undefined || runtime.state === 'probing' || runtime.inspection !== undefined) throw new ProtocolFault('conflict');
+    const generation = runtime.generation; const controller = new AbortController(); runtime.inspection = controller;
+    try {
+      const report = await runtime.session.checkNetwork(controller.signal, generation);
+      if (!this.current(runtime, generation) || controller.signal.aborted) throw new ProtocolFault('cancelled');
+      return report;
+    } finally { if (runtime.inspection === controller) runtime.inspection = undefined; }
+  }
+
   async runSample(id: string, input: ProbeSampleInput): Promise<ProbeSampleResult> {
     validateSampleInput(input);
     const runtime = this.get(id);
@@ -203,8 +216,8 @@ export class AuthService {
     runtime.generation++;
     const probe = runtime.probe;
     const browser = runtime.browser;
-    runtime.controller?.abort();
-    runtime.controller = undefined;
+    runtime.controller?.abort(); runtime.inspection?.abort();
+    runtime.controller = undefined; runtime.inspection = undefined;
     runtime.probe = undefined;
     runtime.browser = undefined;
     probe?.dispose();
@@ -219,7 +232,7 @@ export class AuthService {
   private runtime(config: ServerConfig): ServerRuntime {
     return {
       config, session: this.createSession(config), state: 'idle', generation: 0,
-      controller: undefined, probe: undefined, browser: undefined,
+      controller: undefined, inspection: undefined, probe: undefined, browser: undefined,
       workspaces: [], sessions: [], failure: null, sample: null,
     };
   }

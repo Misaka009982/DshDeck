@@ -1,10 +1,13 @@
 import { ProtocolFault, requireId, requireKeys, requireRecord } from '../../shared/faults.js';
 import { assertReadRequest } from '../protocol/read-policy.js';
 import { assertBusinessRequest, MAX_REQUEST_BYTES } from '../protocol/business-policy.js';
+import { fileShareUrl } from '../../shared/files.js';
+import type { FileShareRequest } from '../../shared/files.js';
 
 /** Chromium 只接受 main 临时登记的只读 RPC；不放行认证网页的业务载体。 */
 export class ReadRequestGate {
   private readonly pending = new Set<string>();
+  private readonly fileReads = new Map<string, number>();
   private readonly baseUrl: URL;
 
   constructor(baseUrl: string) { this.baseUrl = new URL(baseUrl); }
@@ -21,18 +24,37 @@ export class ReadRequestGate {
     return this.track(body);
   }
 
+  /** 文件 GET 只供 main 临时登记；认证网页不能借用已知路径碰巧赶上授权。 */
+  registerFileShare(request: FileShareRequest): () => void {
+    const target = fileShareUrl(this.baseUrl.href, request).href;
+    if (this.fileReads.size >= 32 && !this.fileReads.has(target)) throw new ProtocolFault('budget');
+    this.fileReads.set(target, (this.fileReads.get(target) ?? 0) + 1);
+    let active = true;
+    return () => {
+      if (!active) return;
+      active = false;
+      const count = this.fileReads.get(target) ?? 0;
+      if (count <= 1) this.fileReads.delete(target); else this.fileReads.set(target, count - 1);
+    };
+  }
+
   private track(body: string): () => void {
     this.pending.add(body);
     return () => { this.pending.delete(body); };
   }
 
-  allows(target: string, method: string, body: string): boolean {
-    let url: URL;
+  allows(target: string, method: string, body: string, fromPage = false): boolean {
+    let url: URL; let socket = false;
     try {
       url = new URL(target);
+      socket = url.protocol === 'ws:' || url.protocol === 'wss:';
       if (url.protocol === 'wss:') url.protocol = 'https:';
       else if (url.protocol === 'ws:') url.protocol = 'http:';
     } catch { return false; }
+    const prefix = new URL('dsh-file-share/api', this.baseUrl).pathname;
+    if (url.origin === this.baseUrl.origin && (url.pathname === prefix || url.pathname.startsWith(`${prefix}/`))) {
+      return !fromPage && !socket && method === 'GET' && body === '' && this.fileReads.has(url.href);
+    }
     let decoded: unknown;
     if (body !== '') {
       try { decoded = JSON.parse(body) as unknown; } catch { decoded = undefined; }

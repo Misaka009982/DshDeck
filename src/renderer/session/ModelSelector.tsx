@@ -3,6 +3,7 @@ import type { SessionContext } from '../../shared/domain.js';
 import { currentModel } from '../../shared/native-controls.js';
 import type { CatalogModel, ModelCatalog, ModelSelection, NativeSnapshot } from '../../shared/native-controls.js';
 import type { WorkbenchClientStore } from '../state/workbench-store.js';
+import { WorkbenchIcon } from '../ui/WorkbenchIcon.js';
 
 interface Props { readonly context: SessionContext; readonly native: NativeSnapshot | undefined; readonly store: WorkbenchClientStore; readonly disabled: boolean; readonly open: boolean; readonly setOpen: (open: boolean) => void }
 export function ModelSelector({ context, native, store, disabled, open, setOpen }: Props) {
@@ -56,17 +57,17 @@ export function ModelSelector({ context, native, store, disabled, open, setOpen 
     choose({ provider, model: model.id, ...(effort === undefined ? {} : { reasoningEffort: effort }) });
   };
   return <div className="model-selector" ref={root}>
-    <button type="button" className="composer-option" aria-expanded={open} aria-haspopup="dialog" onClick={() => setOpen(!open)} disabled={disabled || selecting}
-      title={selected === null ? '模型尚未取得；不使用固定假模型' : `${selected.provider} / ${selected.model}`}>{selecting ? '切换模型中…' : chosen?.name ?? selected?.model ?? (loading ? '读取模型…' : '选择模型')} <span aria-hidden="true">⌄</span></button>
-    {chosen?.reasoning !== undefined && chosen.reasoning.efforts.length > 0 && selected !== null && <select className="reasoning-select" aria-label="模型思考档位" disabled={disabled || selecting}
-      value={selected.reasoningEffort ?? chosen.reasoning.defaultEffort ?? ''} onChange={event => choose({ provider: selected.provider, model: selected.model, ...(event.target.value === '' ? {} : { reasoningEffort: event.target.value }) })}>
-      <option value="">提供方默认</option>{selected.reasoningEffort !== undefined && !chosen.reasoning.efforts.some(effort => effort.id === selected.reasoningEffort) && <option value={selected.reasoningEffort} disabled>已保存档位：{selected.reasoningEffort}</option>}{chosen.reasoning.efforts.map(effort => <option key={effort.id} value={effort.id}>{effort.name}</option>)}
-    </select>}
+    <button type="button" className={`composer-option model-trigger ${error === '' ? '' : 'has-error'}`} aria-expanded={open} aria-haspopup="dialog" onClick={() => setOpen(!open)} disabled={disabled || selecting}
+      title={error || (selected === null ? '模型尚未取得；不使用固定假模型' : `${selected.provider} / ${selected.model}${selected.reasoningEffort === undefined ? '' : ` · ${selected.reasoningEffort}`}`)}><span className="model-trigger-label">{selecting ? '切换模型中…' : chosen?.name ?? selected?.model ?? (loading ? '读取模型…' : '选择模型')}</span><WorkbenchIcon name="chevron-down" size={13} /></button>
     {open && <div className="native-popover model-popover" role="dialog" aria-label="选择会话模型">
-      <header><strong>模型</strong><button type="button" onClick={() => load(true)} disabled={loading || selecting}>重读目录</button></header>
+      <header><strong>会话模型</strong><div className="popover-header-actions"><button type="button" onClick={() => load(true)} disabled={loading || selecting} title="重读服务器模型目录"><WorkbenchIcon name="refresh" size={13} />重读</button><button type="button" className="icon-button" onClick={() => setOpen(false)} aria-label="关闭模型选择"><WorkbenchIcon name="close" size={15} /></button></div></header>
+      {chosen?.reasoning !== undefined && chosen.reasoning.efforts.length > 0 && selected !== null && <label className="model-effort-field"><span>思考档位</span><select className="reasoning-select" aria-label="模型思考档位" disabled={disabled || selecting}
+        value={selected.reasoningEffort ?? chosen.reasoning.defaultEffort ?? ''} onChange={event => choose({ provider: selected.provider, model: selected.model, ...(event.target.value === '' ? {} : { reasoningEffort: event.target.value }) })}>
+        <option value="">提供方默认</option>{selected.reasoningEffort !== undefined && !chosen.reasoning.efforts.some(effort => effort.id === selected.reasoningEffort) && <option value={selected.reasoningEffort} disabled>已保存档位：{selected.reasoningEffort}</option>}{chosen.reasoning.efforts.map(effort => <option key={effort.id} value={effort.id}>{effort.name}</option>)}
+      </select></label>}
       <input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索模型或提供方" aria-label="搜索模型" autoFocus />
       {loading && catalog === null && <p className="muted">正在读取服务器模型目录…</p>}
-      <div className="model-options" role="list">{rows.map(row => <button type="button" role="listitem" key={JSON.stringify([row.provider, row.model.id])} className={selected?.provider === row.provider && selected.model === row.model.id ? 'is-current' : ''}
+      <div className="model-options" role="group" aria-label="服务器模型列表">{rows.map(row => <button type="button" aria-pressed={selected?.provider === row.provider && selected.model === row.model.id} key={JSON.stringify([row.provider, row.model.id])} className={selected?.provider === row.provider && selected.model === row.model.id ? 'is-current' : ''}
         disabled={selecting || disabled || !catalog?.routableProviders.includes(row.provider)} onClick={() => pick(row.provider, row.model)}>
         <span>{row.model.name}</span><small>{row.providerName}{row.model.description === undefined ? '' : ` · ${row.model.description}`}</small>
       </button>)}</div>
@@ -74,8 +75,8 @@ export function ModelSelector({ context, native, store, disabled, open, setOpen 
       {rows.length === 200 && <p className="muted">列表最多显示 200 项，可继续搜索。</p>}
       {catalog?.failures.map(failure => <p className="native-field-warning" key={failure.id}>{failure.name}：{failure.message}</p>)}
       <p className="muted">这里只切换当前会话模型；提供方认证与权限配置仍在原网页完成。</p>
+      {error !== '' && <p className="native-field-warning" role="status">{error}</p>}
+      {notice !== '' && <p className="muted" role="status">{notice}</p>}
     </div>}
-    {error !== '' && <span className="native-control-error" role="status" title={error}>{error}</span>}
-    {notice !== '' && <span className="native-control-notice" role="status" title={notice}>选择已接受</span>}
   </div>;
 }

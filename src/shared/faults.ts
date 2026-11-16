@@ -1,7 +1,7 @@
 export type FaultKind =
   | 'auth-required' | 'forbidden' | 'not-found' | 'login-response'
   | 'protocol' | 'unsupported' | 'network' | 'tls' | 'cancelled'
-  | 'budget' | 'timeout' | 'conflict' | 'uncertain';
+  | 'budget' | 'timeout' | 'conflict' | 'uncertain' | 'local-state';
 
 export interface PublicFailure {
   readonly kind: FaultKind;
@@ -22,6 +22,7 @@ const messages: Record<FaultKind, string> = {
   timeout: '本次受控读取未在期限内完成，可由用户明确重试。',
   uncertain: '请求已进入网络，但送达结果未知；不会自动重发。请先查看会话或重新连接核实。',
   conflict: '同一请求或入口出现了冲突身份，不能重复发送或拼接不同 Authorization。',
+  'local-state': '当前连接已停止，但本机连接意图未能保存；同日重开可能再次自动恢复。请检查本地配置目录写入权限并复制诊断。',
 };
 
 /** 错误只携带本地分类，不复制远程正文、凭据、URL 查询或 cause。 */

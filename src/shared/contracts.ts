@@ -4,6 +4,8 @@ import type { AppearancePatch, AppearanceSettings } from './appearance.js';
 import type { WebViewport } from './session-web.js';
 import type { WorkbenchCommand } from './workbench-commands.js';
 import type { ModelCatalog, ModelSelection, SelectModelInput, GoalActionInput, CommandDescriptor, CommandExecution } from './native-controls.js';
+import type { FileDirectory, FilePathRead, FilePreview, FileReadScope, FileWorkspace } from './files.js';
+import type { NetworkCheckReport } from './network-check.js';
 
 export interface ServerInput {
   readonly alias: string;
@@ -112,6 +114,11 @@ export interface AppBridge {
   selectModel(input: SelectModelInput): Promise<IpcResult<ModelSelection>>;
   goalAction(input: GoalActionInput): Promise<IpcResult<void>>;
   executeCommand(input: SendTextInput): Promise<IpcResult<CommandExecution>>;
+  fileWorkspace(input: FileReadScope): Promise<IpcResult<FileWorkspace>>;
+  fileDirectory(input: FilePathRead): Promise<IpcResult<FileDirectory>>;
+  filePreview(input: FilePathRead): Promise<IpcResult<FilePreview>>;
+  releaseFiles(input: FileReadScope): Promise<IpcResult<void>>;
+  checkNetwork(id: string): Promise<IpcResult<NetworkCheckReport>>;
   stopRemote(context: SessionContext): Promise<IpcResult<void>>;
   answer(input: AnswerInput): Promise<IpcResult<void>>;
   syncNow(context: SessionContext): Promise<IpcResult<void>>;

@@ -3,6 +3,7 @@ import type { PublicFailure } from './faults.js';
 import type { ServerSnapshot, SessionBrief, WorkspaceBrief } from './contracts.js';
 import type { AppearanceView } from './appearance.js';
 import type { SessionWebState } from './session-web.js';
+import type { RecoveryView } from './recovery.js';
 
 export interface ServerScope {
   readonly serverId: string;
@@ -66,6 +67,8 @@ export interface ServerRow extends ServerSnapshot {
   readonly counts: TaskCounts;
   readonly protocolProfile: string;
   readonly deploymentVerified: false;
+  readonly directoryReady?: boolean;
+  readonly recovery?: RecoveryView;
 }
 export interface WireEvent {
   readonly type: string;
@@ -110,6 +113,7 @@ export interface ConversationView {
   readonly native?: import('./native-controls.js').NativeSnapshot;
   readonly draft: string;
   readonly failure: PublicFailure | null;
+  readonly recovery?: RecoveryView;
   readonly pending: readonly PendingInteraction[];
   readonly sendState: 'idle' | 'sending' | 'accepted' | 'uncertain';
 }

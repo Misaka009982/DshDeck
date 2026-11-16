@@ -1,5 +1,6 @@
 import type { AuthService } from '../auth/auth-service.js';
 import type { ServerSession } from '../auth/server-session.js';
+import type { ServerConfig } from '../../shared/contracts.js';
 import type { AnswerInput, ConversationView, PendingInteraction, PetStatus, ReadConfirmation, SendTextInput, ServerRow, ServerScope, SessionContext, SessionRow, TaskProjection, WorkbenchSnapshot, WireEvent } from '../../shared/domain.js';
 import { countTasks, preferenceKey, resultKey, sessionKey } from '../../shared/domain.js';
 import { ProtocolFault, toPublicFailure } from '../../shared/faults.js';
@@ -20,9 +21,17 @@ import type { AppearanceView } from '../../shared/appearance.js';
 import type { SessionWebState } from '../../shared/session-web.js';
 import type { ModelCatalog, ModelSelection, SelectModelInput, GoalActionInput, CommandDescriptor, CommandExecution } from '../../shared/native-controls.js';
 import { NativeActionLedger, NativeActionNotSent } from './native-action-ledger.js';
+import { FileShareReader } from '../files/file-share-reader.js';
+import type { FileDirectory, FilePathRead, FilePreview, FileReadScope, FileWorkspace } from '../../shared/files.js';
+import { connectionIdentity, localConnectionDay } from '../storage/connection-intents.js';
+import type { ConnectionIntentStore } from '../storage/connection-intents.js';
+import { recoveryDelayMs } from '../../shared/recovery.js';
+import type { RecoveryView } from '../../shared/recovery.js';
 
-interface Binding { readonly adapter: WorkbenchAdapter; readonly scope: ServerScope; readonly signal: AbortSignal }
-interface Foreground { readonly context: SessionContext; readonly controller: AbortController; subscription: AdapterSubscription | undefined }
+interface Binding { readonly adapter: WorkbenchAdapter; readonly scope: ServerScope; readonly signal: AbortSignal; readonly files?: FileShareReader }
+interface FileViewBinding { readonly context: SessionContext; readonly controller: AbortController }
+interface Foreground { readonly context: SessionContext; readonly controller: AbortController; readonly startedAt: number; subscription: AdapterSubscription | undefined; openingTimer: ReturnType<typeof setTimeout> | undefined }
+interface ForegroundRecovery { readonly context: SessionContext; view: RecoveryView; timer: ReturnType<typeof setTimeout> | undefined }
 interface SendLedger { readonly text: string; state: 'sending' | 'accepted' | 'uncertain' }
 export interface PetPort {
   status(): PetStatus;
@@ -46,9 +55,17 @@ export class WorkbenchService {
   private readonly failures = new Map<string, PublicFailure>();
   private readonly sends = new Map<string, SendLedger>();
   private readonly nativeActions = new NativeActionLedger();
+  private readonly fileViews = new Map<string, FileViewBinding>();
+  private readonly releasedFileViews = new Set<string>();
   private readonly initializedReads = new Set<string>();
   private readonly reconnects = new Map<string, { attempt: number; timer: ReturnType<typeof setTimeout> }>();
-  private readonly connected = new Set<string>();
+  private readonly connected = new Map<string, { readonly authProfileId: string; readonly generation: number | null }>();
+  private readonly wantedConnections = new Map<string, string>();
+  private readonly manualConnectionDays = new Map<string, { readonly identity: string; readonly day: string }>();
+  private readonly serverRecoveries = new Map<string, RecoveryView>();
+  private foregroundRecovery: ForegroundRecovery | undefined;
+  private foregroundAttempts = 0;
+  private connectionsRestored = false;
   private readonly suspendedDetails = new Set<string>();
   private readonly recoveryAttempts = new Map<string, number>();
   private lastInterval = 10;
@@ -67,7 +84,7 @@ export class WorkbenchService {
   private web: { status(): SessionWebState } | undefined;
   private webOwner: { readonly scope: ServerScope; readonly sessionId: string | null } | null = null;
 
-  constructor(private readonly auth: AuthService, readonly preferences: Preferences, private readonly logger?: DiagnosticLogger) {
+  constructor(private readonly auth: AuthService, readonly preferences: Preferences, private readonly logger?: DiagnosticLogger, private readonly intents?: ConnectionIntentStore) {
     this.cache = new SessionCache(64 * 1024 * 1024, () => this.changed());
     this.reconciler = new SessionReconciler(this.cache, context => this.acceptCacheFacts(context));
     this.scheduler = new SyncScheduler(async (context, signal) => {
@@ -78,6 +95,19 @@ export class WorkbenchService {
     this.unsubscribed = auth.subscribe(() => this.authChanged());
   }
   async initialize(): Promise<void> { await this.preferences.load(); this.scheduler.setIntervalSeconds(this.preferences.settings().syncIntervalSeconds); this.scheduler.start(); this.changed(); }
+  /** 每日首次不联网；只有同日本机已验证且未手动断开的身份才能启动恢复。 */
+  resumeConnections(): void {
+    if (this.connectionsRestored || this.disposed || this.intents === undefined) return;
+    this.connectionsRestored = true;
+    const servers = this.auth.list(); void this.intents.keepServers(servers.map(server => server.config)).catch(() => {});
+    for (const server of servers) {
+      if (server.state !== 'idle' || !this.intents.shouldResume(server.config)) continue;
+      this.wantConnection(server.config.id); this.connected.set(server.config.id, { authProfileId: server.config.authProfileId, generation: null });
+      this.recoveryAttempts.set(server.config.id, 1); this.setServerRecovery(server.config.id, { phase: 'connecting', attempt: 1, limit: null, retryAt: null });
+      void this.auth.connect(server.config.id, false).catch(error => this.failedReconnectAttempt(server.config.id, 1, error));
+    }
+    this.changed();
+  }
   setWindowState(read: () => { visible: boolean; focused: boolean }): void { this.windowState = read; }
   attachAppearance(port: { view(): AppearanceView }): void { this.appearance = port; this.changed(); }
   appearanceView(): AppearanceView | undefined { return this.appearance?.view(); }
@@ -88,6 +118,7 @@ export class WorkbenchService {
     const binding = this.bindings.get(scope.serverId);
     if (binding !== undefined && !binding.signal.aborted && binding.scope.authProfileId === scope.authProfileId && binding.scope.generation === scope.generation) binding.adapter.setWebOwner?.({ sessionId });
     this.webOwner = { scope: { ...scope }, sessionId };
+    if (this.foregroundRecovery !== undefined && this.currentIsWebOwned(this.foregroundRecovery.context)) this.clearForegroundRecovery();
     if (this.foreground?.context.serverId === scope.serverId && (sessionId === null || this.foreground.context.sessionId === sessionId)) this.stopForeground();
     this.changed();
   }
@@ -102,7 +133,7 @@ export class WorkbenchService {
     if (context !== null && this.foreground === undefined) void this.startForeground(context).catch(error => this.bodyFailed(context, error));
     this.changed();
   }
-  clearSelection(): void { this.stopForeground(); this.focus.clear(); this.lastSelection = null; this.cache.protect(null); this.changed(); }
+  clearSelection(): void { this.cancelFileViews(); this.clearForegroundRecovery(); this.stopForeground(); this.focus.clear(); this.lastSelection = null; this.cache.protect(null); this.changed(); }
   attachPet(pet: PetPort): void { this.pet = pet; this.changed(); }
   attachNotifications(notifications: NotificationPort): void { this.notifications = notifications; this.changed(); }
   preferencesChanged(): void {
@@ -117,7 +148,8 @@ export class WorkbenchService {
     this.beginScope(scope);
     const callbacks = this.callbacks(scope, fault => { carrierFailed(fault); this.handleFault(scope, fault); });
     const adapter = new DshWebAdapter(scope, session.businessTransport(signal), callbacks, signal);
-    this.bindings.set(scope.serverId, { adapter, scope, signal });
+    const files = new FileShareReader((request, active) => session.readFileShare(request, active), signal);
+    this.bindings.set(scope.serverId, { adapter, scope, signal, files });
     this.changed();
     return adapter;
   }
@@ -139,7 +171,9 @@ export class WorkbenchService {
         sessions: workspace.sessionIds.flatMap(id => { const session = sessions.find(session => session.sessionId === id); return session === undefined ? [] : [session]; }),
         counts: countTasks(taskSet.filter(task => workspace.sessionIds.includes(task.sessionId))),
       }));
+      const recovery = this.serverRecoveries.get(server.config.id);
       return { ...server, tree, unassigned: sessions.filter(session => !assigned.has(session.sessionId)), counts: countTasks(taskSet),
+        directoryReady: server.state === 'readonly-ready' && this.directory.ready(server.config.id), ...(recovery === undefined ? {} : { recovery: { ...recovery } }),
         protocolProfile: server.config.id === 'demo' ? 'synthetic' : '0.2.2-rc.3', deploymentVerified: false };
     });
     return {
@@ -150,20 +184,30 @@ export class WorkbenchService {
     };
   }
   async connect(serverId: string): Promise<import('../../shared/contracts.js').ServerSnapshot> {
+    const config = this.wantConnection(serverId, localConnectionDay());
     this.clearReconnect(serverId); this.recoveryAttempts.delete(serverId);
+    if (this.connected.get(serverId)?.authProfileId === config.authProfileId) this.setServerRecovery(serverId, { phase: 'connecting', attempt: 1, limit: null, retryAt: null });
     return this.auth.connect(serverId);
   }
-  authenticate(serverId: string): void { this.clearReconnect(serverId); this.auth.authenticate(serverId); }
-  disconnect(serverId: string): import('../../shared/contracts.js').ServerSnapshot {
+  authenticate(serverId: string): void { this.wantConnection(serverId, localConnectionDay()); this.clearReconnect(serverId); this.auth.authenticate(serverId); }
+  async disconnect(serverId: string): Promise<import('../../shared/contracts.js').ServerSnapshot> {
+    const config = this.auth.list().find(server => server.config.id === serverId)?.config;
+    if (config === undefined) throw new ProtocolFault('not-found');
+    this.wantedConnections.delete(serverId); this.manualConnectionDays.delete(serverId); this.recoveryAttempts.delete(serverId);
     this.clearReconnect(serverId); this.connected.delete(serverId);
-    this.pause(serverId, false);
-    return this.auth.disconnect(serverId);
+    const saved = this.intents?.disconnect(config);
+    this.pause(serverId, false); const snapshot = this.auth.disconnect(serverId);
+    try { await saved; } catch { throw new ProtocolFault('local-state'); }
+    return snapshot;
   }
   select(context: SessionContext): WorkbenchSnapshot {
+    this.validateContext(context);
+    const previous = this.selection();
     const selected = this.focus.select(context);
+    if (previous === null || !sameSession(previous, selected)) this.cancelFileViews();
     this.lastSelection = selected;
     this.cache.protect(selected);
-    this.stopForeground();
+    this.clearForegroundRecovery(); this.stopForeground();
     this.reconciler.cancel(selected);
     this.updateTargets();
     // 不等待 HTTP/WS 再返回：命中缓存时先给 UI 本地正文，然后异步补齐。
@@ -173,13 +217,17 @@ export class WorkbenchService {
   }
   selectedContext(): SessionContext | null { return this.selection(); }
   refreshPresentation(): void { this.changed(); }
-  validateContext(context: SessionContext): void { this.focus.validate(context); }
+  validateContext(context: SessionContext): void {
+    if (context.serverId !== 'demo' || !this.demo) this.validateScope(context.serverId, context.authProfileId, context.generation);
+    this.focus.validate(context);
+  }
   validateScope(serverId: string, authProfileId: string, generation: number): void {
     const current = this.auth.list().find(server => server.config.id === serverId);
-    if (current === undefined || current.config.authProfileId !== authProfileId || current.generation !== generation) throw new ProtocolFault('cancelled');
+    if (current === undefined || current.config.authProfileId !== authProfileId || current.generation !== generation
+      || current.state !== 'readonly-ready' || current.authenticationOpen) throw new ProtocolFault('cancelled');
   }
   taskSnapshot(): readonly TaskProjection[] { return this.tasks; }
-  suspendServerDetails(serverId: string): void { this.suspendedDetails.add(serverId); this.scheduler.pauseServer(serverId); this.reconciler.cancelServer(serverId); if (this.foreground?.context.serverId === serverId) this.stopForeground(); }
+  suspendServerDetails(serverId: string): void { this.cancelFileViews(serverId); if (this.foregroundRecovery?.context.serverId === serverId) this.clearForegroundRecovery(); this.suspendedDetails.add(serverId); this.scheduler.pauseServer(serverId); this.reconciler.cancelServer(serverId); if (this.foreground?.context.serverId === serverId) this.stopForeground(); }
   resumeServerDetails(serverId: string): void { if (this.disposed) return; this.suspendedDetails.delete(serverId); const context = this.focus.current(); if (context?.serverId === serverId) this.select(context); this.changed(); }
   async setFollowed(context: SessionContext, followed: boolean): Promise<void> {
     this.focus.validate(context);
@@ -297,6 +345,12 @@ export class WorkbenchService {
       });
     } catch (error) { this.nativeFailed(input.context, error, 'commands/execute'); throw error; }
   }
+  fileWorkspace(input: FileReadScope): Promise<FileWorkspace> { return this.fileRead(input, (files, signal) => files.workspace(input.context.sessionId, signal), 'dsh-file-share/status'); }
+  fileDirectory(input: FilePathRead): Promise<FileDirectory> { return this.fileRead(input, (files, signal) => files.directory(input.context.sessionId, input.path, signal), 'dsh-file-share/list'); }
+  filePreview(input: FilePathRead): Promise<FilePreview> { return this.fileRead(input, (files, signal) => files.preview(input.context.sessionId, input.path, signal), 'dsh-file-share/preview'); }
+  releaseFiles(input: FileReadScope): void {
+    const key = this.fileViewKey(input); this.fileViews.get(key)?.controller.abort(); this.fileViews.delete(key); this.rememberFileRelease(key);
+  }
   async stop(context: SessionContext): Promise<void> {
     this.assertSelected(context);
     const binding = this.binding(context);
@@ -311,6 +365,9 @@ export class WorkbenchService {
   syncNow(context: SessionContext): void {
     this.focus.validate(context);
     if (this.selection() !== null && sameSession(this.selection() as SessionContext, context)) {
+      if (!this.currentIsWebOwned(context) && this.foreground === undefined) {
+        this.clearForegroundRecovery(); void this.startForeground(context).catch(error => this.bodyFailed(context, error)); this.changed(); return;
+      }
       void this.reconciler.synchronize(context, this.binding(context).adapter, this.binding(context).signal).catch(error => this.bodyFailed(context, error));
     } else this.scheduler.request(context);
   }
@@ -370,14 +427,18 @@ export class WorkbenchService {
   }
   dispose(): void {
     if (this.disposed) return;
-    this.disposed = true; this.unsubscribed(); this.stopForeground();
+    this.disposed = true; this.unsubscribed(); this.clearForegroundRecovery(); this.stopForeground();
     this.scheduler.dispose(); this.reconciler.dispose(); this.pet?.dispose(); this.notifications?.dispose();
     for (const binding of this.bindings.values()) binding.adapter.dispose();
     for (const id of this.reconnects.keys()) this.clearReconnect(id);
     this.bindings.clear(); this.cache.clear(); this.drafts.clear(); this.pending.clear(); this.sends.clear(); this.nativeActions.dispose();
+    this.cancelFileViews(); this.releasedFileViews.clear(); this.serverRecoveries.clear(); this.wantedConnections.clear(); this.manualConnectionDays.clear(); this.connected.clear();
   }
 
   private beginScope(scope: ServerScope): void {
+    this.cancelFileViews(scope.serverId);
+    if (this.foregroundRecovery?.context.serverId === scope.serverId) this.clearForegroundRecovery();
+    if (this.foreground?.context.serverId === scope.serverId) this.stopForeground();
     this.scheduler.pauseServer(scope.serverId); this.reconciler.cancelServer(scope.serverId);
     this.directory.begin(scope); this.state.beginScope(scope); this.pending.delete(scope.serverId); this.cache.markStale(scope.serverId);
   }
@@ -438,37 +499,72 @@ export class WorkbenchService {
     if (this.currentIsWebOwned(context)) return;
     const binding = this.binding(context);
     const controller = new AbortController();
-    const foreground: Foreground = { context, controller, subscription: undefined };
+    const foreground: Foreground = { context, controller, subscription: undefined, openingTimer: undefined, startedAt: Date.now() };
     this.foreground = foreground;
     const signal = AbortSignal.any([controller.signal, binding.signal]);
-    const subscription = await binding.adapter.follow(context.sessionId, {
-      snapshot: snapshot => {
-        if (signal.aborted || !this.scopeCurrent(context)) return;
-        this.cache.applySnapshot(context, snapshot);
-        this.failures.delete(this.pref(context));
-        this.acceptCacheFacts(context);
-        void this.reconciler.repair(context, binding.adapter, signal).catch(error => this.bodyFailed(context, error));
-      },
-      event: event => {
-        if (signal.aborted || !this.scopeCurrent(context)) return;
-        this.cache.applyEvent(context, event); this.acceptEvent(context, event, true);
-        if (this.cache.get(context)?.hasGap) void this.reconciler.repair(context, binding.adapter, signal).catch(error => this.bodyFailed(context, error));
-      },
-      assistant: frame => { if (!signal.aborted && this.scopeCurrent(context)) this.cache.applyAssistant(context, frame); },
-      projections: frame => {
-        if (signal.aborted || !this.scopeCurrent(context)) return;
-        this.cache.applyProjections(context, frame);
-        const title = this.cache.get(context)?.title;
-        if (title !== null && title !== undefined) this.state.setTitle(context, context.sessionId, title.text, title.asOfSeq);
-        this.changed();
-      },
-      projectionsFailed: error => { if (!signal.aborted && this.scopeCurrent(context)) { this.cache.setNativeFailure(context, error); if (error.kind !== 'cancelled') this.logger?.fault('read-failed', error, { serverId: context.serverId, generation: context.generation, endpoint: 'session/projections' }); } },
-      failed: error => this.bodyFailed(context, error),
-    }, signal);
-    if (signal.aborted || this.foreground !== foreground) subscription.cancel(); else foreground.subscription = subscription;
+    foreground.openingTimer = setTimeout(() => this.foregroundFailed(foreground, new ProtocolFault('timeout')), 15000);
+    try {
+      const subscription = await binding.adapter.follow(context.sessionId, {
+        snapshot: snapshot => {
+          if (signal.aborted || this.foreground !== foreground || !this.scopeCurrent(context)) return;
+          if (foreground.openingTimer !== undefined) clearTimeout(foreground.openingTimer); foreground.openingTimer = undefined;
+          this.cache.applySnapshot(context, snapshot); this.clearForegroundRecovery(false, true);
+          this.failures.delete(this.pref(context)); this.acceptCacheFacts(context);
+          void this.reconciler.repair(context, binding.adapter, signal).catch(error => this.bodyFailed(context, error));
+        },
+        event: event => {
+          if (signal.aborted || this.foreground !== foreground || !this.scopeCurrent(context)) return;
+          this.cache.applyEvent(context, event); this.acceptEvent(context, event, true);
+          if (this.cache.get(context)?.hasGap) void this.reconciler.repair(context, binding.adapter, signal).catch(error => this.bodyFailed(context, error));
+        },
+        assistant: frame => { if (!signal.aborted && this.foreground === foreground && this.scopeCurrent(context)) this.cache.applyAssistant(context, frame); },
+        projections: frame => {
+          if (signal.aborted || this.foreground !== foreground || !this.scopeCurrent(context)) return;
+          this.cache.applyProjections(context, frame);
+          const title = this.cache.get(context)?.title;
+          if (title !== null && title !== undefined) this.state.setTitle(context, context.sessionId, title.text, title.asOfSeq);
+          this.changed();
+        },
+        projectionsFailed: error => { if (!signal.aborted && this.foreground === foreground && this.scopeCurrent(context)) { this.cache.setNativeFailure(context, error); if (error.kind !== 'cancelled') this.logger?.fault('read-failed', error, { serverId: context.serverId, generation: context.generation, endpoint: 'session/projections' }); } },
+        failed: error => this.foregroundFailed(foreground, error),
+      }, signal);
+      if (signal.aborted || this.foreground !== foreground) subscription.cancel(); else foreground.subscription = subscription;
+    } catch (error) { if (!signal.aborted && this.foreground === foreground) this.foregroundFailed(foreground, error); }
+  }
+  /** 只有真正失败的当前实时流可重试；旁路预缓存超时不能打断健康实时流。 */
+  private foregroundFailed(foreground: Foreground, error: unknown): void {
+    if (this.foreground !== foreground || foreground.controller.signal.aborted || !this.scopeCurrent(foreground.context)) return;
+    const failure = toPublicFailure(error); if (failure.kind === 'cancelled') return;
+    this.bodyFailed(foreground.context, error);
+    if (!['network', 'timeout'].includes(failure.kind) || this.currentIsWebOwned(foreground.context)) { this.clearForegroundRecovery(); if (this.foreground === foreground) this.stopForeground(); return; }
+    const binding = this.bindings.get(foreground.context.serverId);
+    if (binding === undefined || binding.signal.aborted || this.suspendedDetails.has(foreground.context.serverId)) return;
+    if (Date.now() - foreground.startedAt > 30000) this.foregroundAttempts = 0;
+    this.stopForeground();
+    const attempt = this.foregroundAttempts = Math.min(this.foregroundAttempts + 1, 1000000); const delay = recoveryDelayMs(attempt);
+    const recovery: ForegroundRecovery = { context: foreground.context, view: { phase: 'waiting', attempt, limit: null, retryAt: Date.now() + delay }, timer: undefined };
+    this.foregroundRecovery = recovery;
+    this.logRecovery(foreground.context.serverId, foreground.context.generation, 'conversation', 'waiting', attempt, delay);
+    recovery.timer = setTimeout(() => {
+      if (this.disposed || this.foregroundRecovery !== recovery) return;
+      const selected = this.selection();
+      if (selected === null || !sameSession(selected, recovery.context) || this.currentIsWebOwned(selected) || !this.scopeCurrent(selected)
+        || this.suspendedDetails.has(selected.serverId) || !this.directory.ready(selected.serverId)) { this.clearForegroundRecovery(); return; }
+      recovery.timer = undefined; recovery.view = { ...recovery.view, phase: 'connecting', retryAt: null };
+      this.logRecovery(selected.serverId, selected.generation, 'conversation', 'connecting', attempt); this.changed();
+      void this.startForeground(selected).catch(error => this.bodyFailed(selected, error));
+    }, delay);
+    this.changed();
+  }
+  private clearForegroundRecovery(resetAttempts = true, completed = false): void {
+    const recovery = this.foregroundRecovery; this.foregroundRecovery = undefined;
+    if (recovery?.timer !== undefined) clearTimeout(recovery.timer);
+    if (recovery !== undefined) this.logRecovery(recovery.context.serverId, recovery.context.generation, 'conversation', completed ? 'ready' : 'cancelled', recovery.view.attempt);
+    if (resetAttempts) this.foregroundAttempts = 0;
   }
   private stopForeground(): void {
     const foreground = this.foreground; this.foreground = undefined;
+    if (foreground?.openingTimer !== undefined) clearTimeout(foreground.openingTimer);
     foreground?.controller.abort(); foreground?.subscription?.cancel();
     if (foreground !== undefined) this.cache.markNativeCached(foreground.context);
   }
@@ -508,6 +604,8 @@ export class WorkbenchService {
     this.changed();
   }
   private pause(serverId: string, revoke: boolean): void {
+    this.cancelFileViews(serverId);
+    if (this.foregroundRecovery?.context.serverId === serverId) this.clearForegroundRecovery();
     this.scheduler.pauseServer(serverId); this.reconciler.cancelServer(serverId);
     if (this.foreground?.context.serverId === serverId) this.stopForeground();
     if (revoke) {
@@ -518,40 +616,90 @@ export class WorkbenchService {
   }
   private authChanged(): void {
     if (this.disposed) return;
-    for (const server of this.auth.list()) {
+    const servers = this.auth.list(); void this.intents?.keepServers(servers.map(server => server.config)).catch(() => {});
+    for (const server of servers) {
       const oldScope = this.directory.scope(server.config.id);
-      if (oldScope !== undefined && oldScope.authProfileId !== server.config.authProfileId) this.pause(server.config.id, true);
+      if (oldScope !== undefined && oldScope.authProfileId !== server.config.authProfileId) { this.pause(server.config.id, true); this.connected.delete(server.config.id); }
+      const wanted = this.wantedConnections.get(server.config.id);
+      if (wanted !== undefined && wanted !== connectionIdentity(server.config)) {
+        this.wantedConnections.delete(server.config.id); this.manualConnectionDays.delete(server.config.id); this.connected.delete(server.config.id); this.clearReconnect(server.config.id);
+      }
       if (server.state === 'readonly-ready') {
-        this.connected.add(server.config.id); this.clearReconnect(server.config.id); this.recoveryAttempts.delete(server.config.id);
-        if (this.lastSelection?.serverId === server.config.id && this.lastSelection.authProfileId === server.config.authProfileId) {
+        const previous = this.connected.get(server.config.id);
+        const newlyVerified = previous?.authProfileId !== server.config.authProfileId || previous.generation !== server.generation;
+        this.connected.set(server.config.id, { authProfileId: server.config.authProfileId, generation: server.generation }); this.clearReconnect(server.config.id, true); this.recoveryAttempts.delete(server.config.id);
+        const manual = this.manualConnectionDays.get(server.config.id);
+        if (manual !== undefined && manual.identity === connectionIdentity(server.config) && this.wantedConnections.get(server.config.id) === manual.identity) {
+          this.manualConnectionDays.delete(server.config.id); void this.intents?.rememberVerified(server.config, manual.day).catch(() => {});
+        }
+        if (newlyVerified && this.lastSelection?.serverId === server.config.id && this.lastSelection.authProfileId === server.config.authProfileId) {
           const resolved = this.focus.resolve(server.config.id, this.lastSelection.sessionId);
           if (resolved !== undefined && (this.foreground === undefined || !sameSession(this.foreground.context, resolved))) this.select(resolved);
         }
-      } else if (server.state === 'authenticating') this.pause(server.config.id, false);
-      else if (['auth-required', 'denied'].includes(server.state)) this.pause(server.config.id, true);
+      } else if (server.authenticationOpen || server.state === 'authenticating') { this.clearReconnect(server.config.id); this.pause(server.config.id, false); }
+      else if (['auth-required', 'denied'].includes(server.state)) {
+        this.wantedConnections.delete(server.config.id); this.manualConnectionDays.delete(server.config.id); this.recoveryAttempts.delete(server.config.id); this.connected.delete(server.config.id);
+        this.clearReconnect(server.config.id);
+        if (wanted !== undefined) void this.intents?.disconnect(server.config).catch(() => {});
+        this.pause(server.config.id, true);
+      }
       else if (server.state === 'failed' || server.state === 'incompatible') {
         this.pause(server.config.id, false);
-        if (!server.authenticationOpen && server.failure?.kind === 'network' && this.connected.has(server.config.id)) this.scheduleReconnect(server.config.id);
+        if (server.failure !== null && ['network', 'timeout'].includes(server.failure.kind) && this.wantedConnections.get(server.config.id) === connectionIdentity(server.config)) this.scheduleReconnect(server.config.id);
+        else this.clearReconnect(server.config.id);
+      } else if (server.state === 'idle' || server.state === 'cancelled' || server.state === 'probing') {
+        // 编辑入口/路线、取消登录或重新探测会使旧载体失效；缓存可显示，旧目录不再具有路由权限。
+        if (oldScope !== undefined) this.pause(server.config.id, false);
       }
     }
     this.changed();
   }
+  private wantConnection(serverId: string, day?: string): ServerConfig {
+    const config = this.auth.list().find(server => server.config.id === serverId)?.config;
+    if (config === undefined) throw new ProtocolFault('not-found');
+    const identity = connectionIdentity(config); this.wantedConnections.set(serverId, identity);
+    if (day !== undefined) this.manualConnectionDays.set(serverId, { identity, day });
+    return config;
+  }
   private scheduleReconnect(serverId: string): void {
-    if (this.reconnects.has(serverId)) return;
-    const attempt = (this.recoveryAttempts.get(serverId) ?? 0) + 1;
-    if (attempt > 5) return;
+    if (this.reconnects.has(serverId) || this.disposed) return;
+    const config = this.auth.list().find(server => server.config.id === serverId)?.config;
+    if (config === undefined || this.wantedConnections.get(serverId) !== connectionIdentity(config)) return;
+    const attempt = Math.min((this.recoveryAttempts.get(serverId) ?? 0) + 1, 1000000); const delay = recoveryDelayMs(attempt);
     this.recoveryAttempts.set(serverId, attempt);
+    this.setServerRecovery(serverId, { phase: 'waiting', attempt, limit: null, retryAt: Date.now() + delay });
     const timer = setTimeout(() => {
       this.reconnects.delete(serverId);
-      if (!this.disposed) void this.auth.connect(serverId, false).catch(() => {});
-    }, Math.min(30000, 1000 * 2 ** attempt));
+      if (this.disposed || this.wantedConnections.get(serverId) !== connectionIdentity(config)) return;
+      this.setServerRecovery(serverId, { phase: 'connecting', attempt, limit: null, retryAt: null }); this.changed();
+      // 网络重试只复用登录态，不自动弹出登录窗，也不重发任何人工写入。
+      void this.auth.connect(serverId, false).catch(error => this.failedReconnectAttempt(serverId, attempt, error));
+    }, delay);
     this.reconnects.set(serverId, { attempt, timer });
   }
-  private clearReconnect(serverId: string): void { const reconnect = this.reconnects.get(serverId); if (reconnect !== undefined) clearTimeout(reconnect.timer); this.reconnects.delete(serverId); }
+  private failedReconnectAttempt(serverId: string, attempt: number, error: unknown): void {
+    if (this.disposed || this.serverRecoveries.get(serverId)?.attempt !== attempt) return;
+    if (['network', 'timeout'].includes(toPublicFailure(error).kind)) this.scheduleReconnect(serverId); else this.clearReconnect(serverId);
+    this.changed();
+  }
+  private setServerRecovery(serverId: string, recovery: RecoveryView): void {
+    this.serverRecoveries.set(serverId, recovery);
+    this.logRecovery(serverId, this.auth.list().find(server => server.config.id === serverId)?.generation ?? 0, 'server', recovery.phase, recovery.attempt,
+      recovery.retryAt === null ? 0 : Math.max(0, Math.min(30000, recovery.retryAt - Date.now())));
+  }
+  private clearReconnect(serverId: string, completed = false): void {
+    const reconnect = this.reconnects.get(serverId); if (reconnect !== undefined) clearTimeout(reconnect.timer); this.reconnects.delete(serverId);
+    const recovery = this.serverRecoveries.get(serverId); this.serverRecoveries.delete(serverId);
+    if (recovery !== undefined) this.logRecovery(serverId, this.auth.list().find(server => server.config.id === serverId)?.generation ?? 0, 'server', completed ? 'ready' : 'cancelled', recovery.attempt);
+  }
+  private logRecovery(serverId: string, generation: number, target: 'server' | 'conversation', phase: 'waiting' | 'connecting' | 'stopped' | 'ready' | 'cancelled', attempt: number, delay = 0): void {
+    this.logger?.record('info', 'reconnect-state', { serverId, generation, recoveryTarget: target, recoveryPhase: phase, retryAttempt: attempt, retryDelayMs: delay });
+  }
   private bodyFailed(context: SessionContext, error: unknown): void {
     if (!this.scopeCurrent(context)) return;
     const failure = toPublicFailure(error);
-    if (failure.kind !== 'cancelled') this.logger?.fault('read-failed', error, { serverId: context.serverId, generation: context.generation });
+    if (failure.kind === 'cancelled') return;
+    this.logger?.fault('read-failed', error, { serverId: context.serverId, generation: context.generation });
     this.failures.set(this.pref(context), failure);
     if (['forbidden', 'auth-required', 'login-response'].includes(failure.kind)) {
       this.directory.removeSession(context, context.sessionId); this.state.revoke(context, context.sessionId);
@@ -559,6 +707,41 @@ export class WorkbenchService {
       if (this.foreground !== undefined && sameSession(this.foreground.context, context)) this.stopForeground();
     } else this.cache.setFailure(context, error);
     this.changed();
+  }
+  /** 文件读取不参与问答或审批，允许当前原网页 owner 同时保有人工交互。 */
+  private fileBinding(context: SessionContext): Binding & { readonly files: FileShareReader } {
+    this.assertSelected(context);
+    const server = this.auth.list().find(server => server.config.id === context.serverId);
+    if (server?.state !== 'readonly-ready' || server.authenticationOpen || this.suspendedDetails.has(context.serverId)) throw new ProtocolFault('auth-required');
+    const binding = this.binding(context); const files = binding.files;
+    if (files === undefined || binding.adapter.source !== 'live') throw new ProtocolFault('unsupported');
+    return { ...binding, files };
+  }
+  private async fileRead<T>(input: FileReadScope, operation: (files: FileShareReader, signal: AbortSignal) => Promise<T>, endpoint: string): Promise<T> {
+    const binding = this.fileBinding(input.context); const key = this.fileViewKey(input);
+    if (this.releasedFileViews.has(key)) throw new ProtocolFault('cancelled');
+    let view = this.fileViews.get(key);
+    if (view === undefined) {
+      if (this.fileViews.size >= 4) throw new ProtocolFault('budget');
+      view = { context: input.context, controller: new AbortController() }; this.fileViews.set(key, view);
+    }
+    const signal = AbortSignal.any([binding.signal, view.controller.signal]);
+    try {
+      const result = await operation(binding.files, signal);
+      if (signal.aborted || this.fileViews.get(key) !== view) throw new ProtocolFault('cancelled');
+      this.fileBinding(input.context); return result;
+    } catch (error) {
+      if (toPublicFailure(error).kind !== 'cancelled') this.logger?.fault('read-failed', error, { serverId: input.context.serverId, generation: input.context.generation, endpoint });
+      throw error;
+    }
+  }
+  private fileViewKey(input: FileReadScope): string { return JSON.stringify([input.context.serverId, input.context.authProfileId, input.context.generation, input.context.sessionId, input.viewId]); }
+  private rememberFileRelease(key: string): void {
+    this.releasedFileViews.add(key);
+    if (this.releasedFileViews.size > 256) { const oldest = this.releasedFileViews.values().next().value; if (oldest !== undefined) this.releasedFileViews.delete(oldest); }
+  }
+  private cancelFileViews(serverId?: string): void {
+    for (const [key, view] of this.fileViews) if (serverId === undefined || view.context.serverId === serverId) { view.controller.abort(); this.fileViews.delete(key); this.rememberFileRelease(key); }
   }
   private async prepareNative<T>(prepare: () => T | Promise<T>): Promise<T> {
     try { return await prepare(); }
@@ -584,6 +767,7 @@ export class WorkbenchService {
     if (this.scopeCurrent(context) && toPublicFailure(error).kind !== 'cancelled') this.logger?.fault('read-failed', error, { serverId: context.serverId, generation: context.generation, endpoint });
   }
   private binding(context: ServerScope): Binding {
+    if (context.serverId !== 'demo' || !this.demo) this.validateScope(context.serverId, context.authProfileId, context.generation);
     const binding = this.bindings.get(context.serverId);
     if (binding === undefined || binding.signal.aborted || binding.scope.authProfileId !== context.authProfileId || binding.scope.generation !== context.generation) throw new ProtocolFault('auth-required');
     return binding;
@@ -598,7 +782,7 @@ export class WorkbenchService {
       && this.directory.scope(saved.serverId)?.authProfileId === saved.authProfileId
       && (this.directory.session(saved.serverId, saved.sessionId) === undefined || this.directory.archived(saved.serverId, saved.sessionId))) {
       // 离线保留缓存；已确认删除或归档则撤销选择，不留可点击的旧人工输入。
-      this.stopForeground(); this.focus.clear(saved.serverId); this.lastSelection = null; this.cache.protect(null);
+      this.cancelFileViews(saved.serverId); this.clearForegroundRecovery(); this.stopForeground(); this.focus.clear(saved.serverId); this.lastSelection = null; this.cache.protect(null);
     }
     const selected = this.focus.current();
     if (selected !== null) this.lastSelection = selected;
@@ -631,7 +815,9 @@ export class WorkbenchService {
       || server.config.authProfileId !== context.authProfileId);
     const cached = locked ? undefined : cachedEntry;
     const binding = this.bindings.get(context.serverId);
-    const connected = binding !== undefined && !binding.signal.aborted && this.directory.ready(context.serverId);
+    const verified = this.connected.get(context.serverId);
+    const connected = binding !== undefined && !binding.signal.aborted && this.directory.ready(context.serverId)
+      && (context.serverId === 'demo' || verified?.authProfileId === context.authProfileId && verified.generation === context.generation);
     const failure = this.failures.get(this.pref(context)) ?? cached?.failure ?? null;
     const ledgers = [...this.sends.entries()].filter(([key]) => JSON.parse(key)[0] === this.pref(context));
     const last = ledgers[ledgers.length - 1]?.[1];
@@ -642,13 +828,17 @@ export class WorkbenchService {
       hasMore: cached?.hasMore ?? false, hasGap: cached?.hasGap ?? false, syncedAt: cached?.syncedAt ?? null,
       syncing: cached?.syncing ?? (cached === undefined && failure === null), draft: this.drafts.get(this.pref(context)) ?? '', failure,
       ...(cached?.native === undefined ? {} : { native: cached.native }),
+      ...(locked || this.foregroundRecovery === undefined || !sameSession(this.foregroundRecovery.context, context) ? {} : { recovery: { ...this.foregroundRecovery.view } }),
       pending: this.pending.get(context.serverId)?.filter(item => item.sessionId === context.sessionId) ?? [], sendState: last?.state ?? 'idle',
     };
   }
   private updateTargets(): void {
     const targets = this.state.all().flatMap(facts => {
       const context = this.directory.resolve(facts.serverId, facts.sessionId);
-      return context === undefined || !facts.accessible || this.suspendedDetails.has(facts.serverId) ? [] : [{ context, running: facts.running, pending: facts.pendingIds.length > 0 }];
+      const binding = this.bindings.get(facts.serverId); const verified = this.connected.get(facts.serverId);
+      return context === undefined || binding === undefined || binding.signal.aborted || !facts.accessible || this.suspendedDetails.has(facts.serverId)
+        || facts.serverId !== 'demo' && (verified?.authProfileId !== context.authProfileId || verified.generation !== context.generation)
+        ? [] : [{ context, running: facts.running, pending: facts.pendingIds.length > 0 }];
     });
     const selected = this.selection();
     this.scheduler.update(targets, selected !== null && this.currentIsWebOwned(selected) ? null : selected);

@@ -18,6 +18,10 @@ import { describeLogError } from '../logging/diagnostic-logger.js';
 import type { ConnectionStep, DiagnosticLogger, LogFields, TransportState } from '../logging/diagnostic-logger.js';
 import { navigationFields, responseCategory } from '../logging/connection-details.js';
 import { isNativeReadRequest } from '../protocol/native-policy.js';
+import { fileShareUrl } from '../../shared/files.js';
+import type { FileShareRequest } from '../../shared/files.js';
+import { checkSavedEndpoint } from './network-check.js';
+import type { NetworkCheckReport } from '../../shared/network-check.js';
 
 /** 每个 profile 的浏览器、HTTP 和 Node WS 都从此处取得同一认证范围。 */
 export class ServerSession {
@@ -54,7 +58,7 @@ export class ServerSession {
         if (target.protocol === 'wss:') target.protocol = 'https:';
         compatible = this.compatibilityContents.has(details.webContentsId ?? -1) && target.origin === this.baseUrl.origin;
       } catch { compatible = false; }
-      callback({ cancel: !compatible && !this.gate.allows(details.url, details.method, body) });
+      callback({ cancel: !compatible && !this.gate.allows(details.url, details.method, body, details.webContentsId !== undefined && details.webContentsId >= 0) });
     });
   }
 
@@ -63,6 +67,65 @@ export class ServerSession {
   transport(lifetime: AbortSignal): PocTransport { return this.createTransport(lifetime, false); }
 
   businessTransport(lifetime: AbortSignal): PocTransport { return this.createTransport(lifetime, true); }
+
+  /** 独立只读插件通道；不暴露原始 URL、写方法或认证材料给 renderer。 */
+  async readFileShare(request: FileShareRequest, signal: AbortSignal): Promise<Response> {
+    const target = fileShareUrl(this.config.baseUrl, request);
+    const release = this.gate.registerFileShare(request);
+    const endpoint = request.operation === 'workspace' ? 'dsh-file-share/status' : request.operation === 'directory' ? 'dsh-file-share/list' : 'dsh-file-share/preview';
+    const fields: LogFields = { endpoint, ...navigationFields(target.href, this.config.baseUrl), proxyPolicy: this.config.proxyMode ?? 'system' };
+    const headers = new Headers({ origin: this.baseUrl.origin });
+    let authorization = this.credentials.authorizationFor(this.config.authProfileId, target.href);
+    if (authorization !== undefined) headers.set('authorization', authorization);
+    try {
+      if (signal.aborted) throw faultForAbort(signal);
+      await this.ready(signal);
+      this.recordTransport('http-request', 'begin', fields);
+      const read = (): Promise<Response> => this.browserSession.fetch(target.href, { method: 'GET', signal, headers, credentials: 'include', redirect: 'manual', cache: 'no-store' });
+      let response = await read();
+      // GET 可在真实 BasicAuth 挑战后复用一次；端口、origin、realm 仍需完整匹配。
+      if (response.status === 401 && authorization === undefined) {
+        const scope = basicChallengeScope(this.config.authProfileId, target.href, response.headers.get('www-authenticate'));
+        const saved = scope === undefined ? undefined : this.credentials.get(scope);
+        if (scope !== undefined && saved !== undefined) {
+          this.recordTransport('http-response', 'headers', { ...fields, httpStatus: 401, responseType: responseCategory(response.headers.get('content-type')) });
+          await response.body?.cancel().catch(() => {});
+          this.credentials.set(scope, saved); this.credentials.authorizeTarget(scope, target.href);
+          authorization = this.credentials.authorizationFor(this.config.authProfileId, target.href);
+          if (authorization === undefined) throw new ProtocolFault('auth-required');
+          headers.set('authorization', authorization);
+          if (signal.aborted) throw faultForAbort(signal);
+          response = await read();
+        }
+      }
+      if ([401, 403].includes(response.status) && authorization !== undefined) {
+        this.credentials.rejectFor(this.config.authProfileId, target.href, authorization); await this.browserSession.clearAuthCache();
+      }
+      this.recordTransport('http-response', 'headers', { ...fields, httpStatus: response.status, responseType: responseCategory(response.headers.get('content-type')) });
+      return response;
+    } catch (error) {
+      const fault = signal.aborted ? faultForAbort(signal) : error instanceof ProtocolFault ? error : new ProtocolFault(isCertificateFailure(error) ? 'tls' : 'network');
+      this.recordTransport('http-request', fault.kind === 'cancelled' ? 'cancelled' : 'failed', { ...fields, failureKind: fault.kind }, error);
+      throw fault;
+    } finally { release(); }
+  }
+
+  /** HEAD 只核对保存入口的线路，不处理 Cookie、重定向或 dsh 业务握手。 */
+  async checkNetwork(signal: AbortSignal, generation: number): Promise<NetworkCheckReport> {
+    await this.ready(AbortSignal.any([signal, AbortSignal.timeout(8000)]));
+    const fields: LogFields = { ...navigationFields(this.config.baseUrl, this.config.baseUrl), generation, proxyPolicy: this.config.proxyMode ?? 'system' };
+    return checkSavedEndpoint(this.config.baseUrl, {
+      resolveProxy: target => this.browserSession.resolveProxy(target), fetch: (target, init) => this.browserSession.fetch(target, init),
+      observe: (phase, step) => {
+        const connectionStep = phase === 'tcp' ? 'line-tcp' : 'line-http';
+        if (step === null) { this.recordTransport(connectionStep, 'begin', fields); return; }
+        const extra: LogFields = { ...fields, elapsedMs: step.elapsedMs,
+          ...(step.state === 'failed' ? { failureKind: step.failure.kind, ...(step.networkCode === undefined ? {} : { networkCode: step.networkCode as NonNullable<LogFields['networkCode']> }) } : {}),
+          ...(step.state === 'response' ? { httpStatus: step.httpStatus } : {}), ...(step.state === 'skipped' ? { proxyMode: 'configured' as const } : {}) };
+        this.recordTransport(connectionStep, step.state === 'failed' ? step.failure.kind === 'cancelled' ? 'cancelled' : 'failed' : step.state === 'skipped' ? 'blocked' : step.state === 'response' ? 'headers' : 'open', extra);
+      },
+    }, signal);
+  }
 
   clearVolatileCredentials(): void { this.credentials.clear(this.config.authProfileId); }
 
@@ -202,7 +265,13 @@ export class ServerSession {
           headers: currentHeaders, followRedirects: false, perMessageDeflate: false,
           maxPayload: MAX_RESPONSE_BYTES, ...(httpUrl.protocol === 'https:' ? tlsOptions() : {}),
         });
-        let connected = false;
+        let connected = false; let connectedAt = 0;
+        socket.once('close', code => {
+          if (!connected) return;
+          this.recordTransport('ws-carrier', signal.aborted ? 'cancelled' : 'failed', { ...fields, wsCloseCode: code,
+            connectionAborted: signal.aborted, connectionAgeSeconds: Math.max(0, Math.min(604800, Math.floor((performance.now() - connectedAt) / 1000))),
+            ...(signal.aborted ? {} : { failureKind: 'network' as const }) });
+        });
         socket.on('error', error => {
           if (connected && !signal.aborted) this.recordTransport('ws-handshake', 'failed', { ...fields,
             failureKind: isCertificateFailure(error) ? 'tls' : 'network' }, error);
@@ -212,7 +281,7 @@ export class ServerSession {
         try {
           await waitForWebSocket(socket, openingSignal);
           if (signal.aborted) { aborted(); throw faultForAbort(signal); }
-          connected = true; this.recordTransport('ws-handshake', 'open', { ...fields, httpStatus: 101 });
+          connected = true; connectedAt = performance.now(); this.recordTransport('ws-handshake', 'open', { ...fields, httpStatus: 101 });
           return socket;
         } catch (error) {
           if (error instanceof SocketHandshakeFault) {

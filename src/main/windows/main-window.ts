@@ -13,6 +13,7 @@ import type { WorkbenchCommand } from '../../shared/workbench-commands.js';
 import { validateSampleInput } from '../../../tools/poc/protocol-probe.js';
 import { parseAnswerInput, parseReadConfirmation, parseSendText, requireBoolean } from '../security/workbench-input.js';
 import { parseGoalActionInput, parseSelectModelInput } from '../security/native-input.js';
+import { parseFilePathRead, parseFileReadScope } from '../security/file-input.js';
 import { AuthService } from '../auth/auth-service.js';
 import type { BasicAuthBroker } from '../auth/basic-auth-broker.js';
 import type { CredentialStore } from '../auth/credential-store.js';
@@ -110,6 +111,11 @@ export async function openMainWindow(assets: WindowAssets, ipc: IpcRegistry, aut
           detail: '命令由服务器或插件实现，可能修改会话状态；选择菜单只填入命令，确认后才提交一次，不会因失败自动重发。', buttons: ['执行命令', '取消'], defaultId: 1, cancelId: 1 });
         return answer.response === 0;
       }),
+      'app:file-workspace': (input: unknown) => options.workbench.fileWorkspace(parseFileReadScope(input)),
+      'app:file-directory': (input: unknown) => options.workbench.fileDirectory(parseFilePathRead(input, true)),
+      'app:file-preview': (input: unknown) => options.workbench.filePreview(parseFilePathRead(input)),
+      'app:release-files': (input: unknown) => options.workbench.releaseFiles(parseFileReadScope(input)),
+      'app:check-network': (id: unknown) => auth.checkNetwork(requireId(id)),
       'app:stop-remote': (context: unknown) => options.workbench.stop(parseContext(context)),
       'app:answer': (input: unknown) => options.workbench.answer(parseAnswerInput(input)),
       'app:sync-now': (context: unknown) => options.workbench.syncNow(parseContext(context)),

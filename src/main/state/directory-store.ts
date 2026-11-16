@@ -24,9 +24,11 @@ export class DirectoryStore {
   begin(scope: ServerScope): void {
     const previous = this.servers.get(scope.serverId);
     if (previous !== undefined && scope.generation <= previous.scope.generation && scope.authProfileId === previous.scope.authProfileId) return;
+    const reuse = previous !== undefined && previous.scope.authProfileId === scope.authProfileId;
     this.servers.set(scope.serverId, {
-      scope: { ...scope }, sessions: new Map(), workspaces: new Map(), tombstones: new Set(),
-      archived: new Set(), pinned: new Set(), order: [], listed: false, based: false, fresh: true,
+      // 同账户断线只保留展示，listed/based 清零；新目录和工作区均就绪前不能路由旧会话。
+      scope: { ...scope }, sessions: reuse ? new Map(previous.sessions) : new Map(), workspaces: reuse ? new Map(previous.workspaces) : new Map(), tombstones: new Set(),
+      archived: reuse ? new Set(previous.archived) : new Set(), pinned: reuse ? new Set(previous.pinned) : new Set(), order: reuse ? [...previous.order] : [], listed: false, based: false, fresh: true,
     });
   }
 

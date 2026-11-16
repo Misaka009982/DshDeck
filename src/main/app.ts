@@ -9,6 +9,7 @@ import { AuthService } from './auth/auth-service.js';
 import { BasicAuthBroker } from './auth/basic-auth-broker.js';
 import { IpcRegistry } from './security/ipc-registry.js';
 import { Preferences } from './storage/preferences.js';
+import { ConnectionIntentStore } from './storage/connection-intents.js';
 import { WorkbenchService } from './state/workbench-service.js';
 import { PetCompanion } from './pet/pet-companion.js';
 import { NotificationService } from './notifications/notification-service.js';
@@ -49,6 +50,7 @@ let ipc: IpcRegistry | undefined;
 let credentials: CredentialStore | undefined;
 let background: BackgroundService | undefined;
 let windowState: WindowStateStore | undefined;
+let connectionIntents: ConnectionIntentStore | undefined;
 let unsubscribeAuthLogs: (() => void) | undefined;
 let closing = false;
 let finalLogFlushed = false;
@@ -94,7 +96,9 @@ void app.whenReady().then(async () => {
   });
   if (!poc) {
     const preferences = new Preferences(join(app.getPath('userData'), 'preferences.json'), () => workbench?.preferencesChanged());
-    workbench = new WorkbenchService(service, preferences, diagnostics);
+    const intents = new ConnectionIntentStore(join(app.getPath('userData'), 'connection-intents.json'), error => diagnostics.fault('connection-intent-failed', error));
+    await intents.load(); connectionIntents = intents;
+    workbench = new WorkbenchService(service, preferences, diagnostics, intents);
     await workbench.initialize();
   }
   await service.initialize();
@@ -130,6 +134,7 @@ void app.whenReady().then(async () => {
   await pet.rescan();
   await pet.setEnabled(deck.preferences.settings().petEnabled);
   diagnostics.record('info', 'app-ready');
+  deck.resumeConnections();
 }).catch(error => {
   diagnostics.emergency('startup-failed', error);
   const response = dialog.showMessageBoxSync({ type: 'error', title: 'DshDeck 初始化失败',
@@ -151,6 +156,6 @@ app.on('before-quit', event => {
   workbench?.dispose(); auth?.dispose(); ipc?.dispose(); background?.dispose();
   if (auth !== undefined && credentials !== undefined) for (const server of auth.list()) credentials.clear(server.config.authProfileId);
   diagnostics.record('info', 'app-quitting');
-  void Promise.all([credentials?.flush(), windowState?.flush()]).then(() => diagnostics.flush())
+  void Promise.all([credentials?.flush(), windowState?.flush(), connectionIntents?.flush()]).then(() => diagnostics.flush())
     .then(() => { finalLogFlushed = true; app.quit(); });
 });

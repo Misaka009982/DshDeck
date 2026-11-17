@@ -7,6 +7,7 @@ interface WindowPort {
   isMinimized(): boolean;
   isFullScreen(): boolean;
   isMaximized(): boolean;
+  getBounds(): WindowBounds;
   getNormalBounds(): WindowBounds;
   on(event: string, listener: () => void): unknown;
   removeListener(event: string, listener: () => void): unknown;
@@ -67,11 +68,11 @@ export class WindowStateStore {
   }
   private capture(): void {
     const window = this.window;
-    if (window === undefined || window.isDestroyed() || window.isFullScreen()) return;
+    if (window === undefined || window.isDestroyed() || window.isFullScreen() || window.isMinimized()) return;
     try {
-      const bounds = window.getNormalBounds();
-      // 最小化不改变之前的最大化选择；最大化事件已即时捕获正常矩形。
-      const maximized = window.isMinimized() ? this.value?.maximized ?? false : window.isMaximized();
+      const maximized = window.isMaximized();
+      // 贴靠是当前布局，不是贴靠前的还原矩形；最小化已在上方保留最后一次有效记录。
+      const bounds = maximized ? window.getNormalBounds() : window.getBounds();
       void this.set({ version: 1, bounds, maximized });
     } catch (error) { this.failed(error); }
   }

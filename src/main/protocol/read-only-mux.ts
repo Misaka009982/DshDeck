@@ -9,19 +9,34 @@ import { assertReadRequest } from './read-policy.js';
 import type { ReadRequest } from './read-policy.js';
 
 export type StreamRole = 'directory' | 'detail' | 'state';
+export type StreamPurpose = 'foreground' | 'background' | 'jobs' | 'projections' | 'directory' | 'events' | 'probe';
 export interface StreamDiagnostic {
   readonly generation: number;
   readonly endpoint: string;
   readonly role: StreamRole;
+  readonly purpose: StreamPurpose;
+  readonly logicalStream: number;
+  readonly firstItemSeen: boolean;
+  readonly receivedBytes: number;
+  readonly receivedItems: number;
+  readonly carrierIdleMs: number;
+  readonly firstItemMs?: number;
+  readonly lastFrameAgoMs?: number;
   readonly state: 'begin' | 'open' | 'failed' | 'cancelled';
   readonly elapsedMs: number;
   readonly failureKind?: ProtocolFault['kind'];
 }
 interface Subscription {
   readonly role: StreamRole;
+  readonly purpose: StreamPurpose;
+  readonly logicalStream: number;
   readonly endpoint: string;
   readonly startedAt: number;
   opened: boolean;
+  bytes: number;
+  items: number;
+  firstItemMs: number | null;
+  lastFrameAt: number | null;
   readonly unregister: () => void;
   readonly failed: (fault: ProtocolFault) => void;
 }
@@ -35,6 +50,8 @@ export class ReadOnlyMux {
   private resolveReady!: () => void;
   private rejectReady!: (fault: ProtocolFault) => void;
   private closed = false;
+  private nextStream = 0;
+  private lastSocketFrameAt = performance.now();
 
   constructor(
     private readonly socket: WebSocket,
@@ -79,20 +96,22 @@ export class ReadOnlyMux {
     if (this.closed) throw new ProtocolFault('network');
   }
 
-  subscribe(request: ReadRequest, role: StreamRole, item: (value: unknown) => void, failed: (fault: ProtocolFault) => void): ReadSubscription {
+  subscribe(request: ReadRequest, role: StreamRole, item: (value: unknown) => void, failed: (fault: ProtocolFault) => void,
+    purpose: StreamPurpose = role === 'directory' ? 'directory' : 'probe'): ReadSubscription {
     assertReadRequest(request);
     if (['session/list', 'session/events', 'session/state'].includes(request.endpoint)) throw new ProtocolFault('unsupported');
-    return this.subscribeTrusted(request, role, item, failed);
+    return this.subscribeTrusted(request, role, item, failed, purpose);
   }
 
-  protected subscribeTrusted(request: { readonly endpoint: string; readonly payload: unknown }, role: StreamRole, item: (value: unknown) => void, failed: (fault: ProtocolFault) => void): ReadSubscription {
+  protected subscribeTrusted(request: { readonly endpoint: string; readonly payload: unknown }, role: StreamRole, item: (value: unknown) => void, failed: (fault: ProtocolFault) => void,
+    purpose: StreamPurpose = 'probe'): ReadSubscription {
     if (this.closed || this.socket.readyState !== WebSocket.OPEN) throw new ProtocolFault('network');
     const streamId = randomUUID();
     const cancel = (fault?: ProtocolFault): void => this.cancel(streamId, fault);
     const unregister = this.router.register(streamId, this.generation, frame => {
       const subscription = this.subscriptions.get(streamId); if (subscription === undefined) return;
       if (frame.type === 'item') {
-        if (!subscription.opened) { subscription.opened = true; this.diagnose(subscription, 'open'); }
+        if (!subscription.opened) { subscription.opened = true; subscription.firstItemMs = Math.max(0, Math.round(performance.now() - subscription.startedAt)); this.diagnose(subscription, 'open'); }
         try { item(frame.value); }
         catch (error) {
           const fault = error instanceof ProtocolFault ? error : new ProtocolFault('protocol');
@@ -105,7 +124,8 @@ export class ReadOnlyMux {
         unregister(); failed(fault);
       }
     });
-    const subscription: Subscription = { role, endpoint: request.endpoint, startedAt: performance.now(), opened: false, unregister, failed };
+    const subscription: Subscription = { role, purpose, logicalStream: ++this.nextStream, endpoint: request.endpoint, startedAt: performance.now(), opened: false,
+      bytes: 0, items: 0, firstItemMs: null, lastFrameAt: null, unregister, failed };
     this.subscriptions.set(streamId, subscription); this.diagnose(subscription, 'begin');
     try { this.send({ type: 'open', streamId, endpoint: request.endpoint, payload: request.payload }); }
     catch {
@@ -117,7 +137,7 @@ export class ReadOnlyMux {
     return { cancel };
   }
 
-  async readOpening(request: ReadRequest, role: StreamRole, signal: AbortSignal): Promise<unknown> {
+  async readOpening(request: ReadRequest, role: StreamRole, signal: AbortSignal, purpose: StreamPurpose = 'probe'): Promise<unknown> {
     await this.waitUntilOpen(signal);
     return new Promise((resolve, reject) => {
       let settled = false;
@@ -134,7 +154,7 @@ export class ReadOnlyMux {
       const timer = setTimeout(() => finish(undefined, new ProtocolFault('timeout')), 15000);
       signal.addEventListener('abort', aborted, { once: true });
       try {
-        subscription = this.subscribe(request, role, value => finish(value), fault => finish(undefined, fault));
+        subscription = this.subscribe(request, role, value => finish(value), fault => finish(undefined, fault), purpose);
       } catch (error) {
         finish(undefined, error instanceof ProtocolFault ? error : new ProtocolFault('network'));
       }
@@ -154,9 +174,13 @@ export class ReadOnlyMux {
     try {
       if (binary) throw new ProtocolFault('protocol');
       const bytes = Array.isArray(data) ? Buffer.concat(data) : Buffer.isBuffer(data) ? data : Buffer.from(data);
-      const frame = parseRemoteStreamServerMessage(bytes.toString('utf8'));
+      const frame = parseRemoteStreamServerMessage(bytes.toString('utf8')); const receivedAt = performance.now(); this.lastSocketFrameAt = receivedAt;
       const subscription = this.subscriptions.get(frame.streamId);
-      if (subscription !== undefined) this.onBytes(subscription.role, bytes.byteLength, frame.type === 'item');
+      if (subscription !== undefined) {
+        subscription.bytes = Math.min(Number.MAX_SAFE_INTEGER, subscription.bytes + bytes.byteLength);
+        if (frame.type === 'item') subscription.items++;
+        subscription.lastFrameAt = receivedAt; this.onBytes(subscription.role, bytes.byteLength, frame.type === 'item');
+      }
       this.router.dispatch(frame, this.generation);
     } catch (error) {
       this.fail(error instanceof ProtocolFault ? error : new ProtocolFault('protocol'));
@@ -200,8 +224,13 @@ export class ReadOnlyMux {
   /** 只交付本地端点与生命周期元信息，不把 payload、帧、streamId 或会话身份交给日志。 */
   private diagnose(subscription: Subscription, state: StreamDiagnostic['state'], fault?: ProtocolFault): void {
     try {
-      this.onDiagnostic({ generation: this.generation, endpoint: subscription.endpoint, role: subscription.role, state,
-        elapsedMs: Math.max(0, Math.round(performance.now() - subscription.startedAt)), ...(fault === undefined ? {} : { failureKind: fault.kind }) });
+      const now = performance.now();
+      this.onDiagnostic({ generation: this.generation, endpoint: subscription.endpoint, role: subscription.role, purpose: subscription.purpose,
+        logicalStream: subscription.logicalStream, state, firstItemSeen: subscription.opened, receivedBytes: subscription.bytes, receivedItems: subscription.items,
+        elapsedMs: Math.max(0, Math.round(now - subscription.startedAt)), carrierIdleMs: Math.max(0, Math.round(now - this.lastSocketFrameAt)),
+        ...(subscription.firstItemMs === null ? {} : { firstItemMs: subscription.firstItemMs }),
+        ...(subscription.lastFrameAt === null ? {} : { lastFrameAgoMs: Math.max(0, Math.round(now - subscription.lastFrameAt)) }),
+        ...(fault === undefined ? {} : { failureKind: fault.kind }) });
     } catch { /* 诊断消费方失败不能改变物理连接或业务流。 */ }
   }
 }

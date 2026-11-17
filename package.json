@@ -1,6 +1,6 @@
 {
   "name": "dshdeck",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "private": true,
   "license": "AGPL-3.0-or-later",
   "description": "DshDeck 多服务器 dsh 会话工作台",

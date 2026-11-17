@@ -34,7 +34,7 @@ export interface WorkbenchAdapter {
   readonly source: 'live' | 'synthetic';
   connect(): Promise<{ workspaces: readonly import('../../shared/contracts.js').WorkspaceBrief[]; sessions: readonly DirectorySession[] }>;
   follow(sessionId: string, callbacks: FollowCallbacks, signal: AbortSignal): Promise<AdapterSubscription>;
-  opening(sessionId: string, signal: AbortSignal): Promise<FollowSnapshot>;
+  opening(sessionId: string, signal: AbortSignal, purpose?: 'foreground' | 'background'): Promise<FollowSnapshot>;
   history(sessionId: string, beforeSeq: number, throughSeq: number, signal: AbortSignal): Promise<HistoryPage>;
   send(input: SendTextInput, signal: AbortSignal): Promise<void>;
   stop(sessionId: string, signal: AbortSignal): Promise<void>;

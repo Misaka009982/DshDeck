@@ -26,7 +26,8 @@ export class BackgroundJobsReader {
   private expiry: ReturnType<typeof setTimeout> | undefined;
   private disposed = false;
   constructor(private readonly authorize: (context: SessionContext) => WorkbenchAdapter,
-    private readonly report: (context: SessionContext, endpoint: 'job/list' | 'job/follow', error: unknown) => void = () => {}, private readonly now: () => number = Date.now) {}
+    private readonly report: (context: SessionContext, endpoint: 'job/list' | 'job/follow', error: unknown) => void = () => {}, private readonly now: () => number = Date.now,
+    private readonly admitted: (context: SessionContext) => boolean = () => true) {}
 
   read(input: JobViewRead): JobPanelSnapshot | null {
     if (this.disposed) throw new ProtocolFault('cancelled');
@@ -79,7 +80,7 @@ export class BackgroundJobsReader {
   dispose(): void { if (this.disposed) return; this.disposed = true; this.stopLease(); this.outputs.clear(); this.released.clear(); }
 
   private ensureRows(lease: Lease): void {
-    if (lease.rowsLife !== undefined || lease.rowsRetryAt > this.now() || this.lease !== lease) return;
+    if (lease.rowsLife !== undefined || lease.rowsRetryAt > this.now() || this.lease !== lease || !this.admitted(lease.context)) return;
     const life = this.life(); lease.rowsLife = life;
     life.timer = setTimeout(() => this.rowsFailed(lease, life, new ProtocolFault('timeout')), 15000);
     try {
@@ -104,7 +105,7 @@ export class BackgroundJobsReader {
     } catch (error) { this.rowsFailed(lease, life, error); }
   }
   private ensureOutput(lease: Lease): void {
-    if (lease.desired === null || lease.state !== 'live' || lease.outputLife !== undefined || lease.outputRetryAt > this.now() || this.lease !== lease) return;
+    if (lease.desired === null || lease.state !== 'live' || lease.outputLife !== undefined || lease.outputRetryAt > this.now() || this.lease !== lease || !this.admitted(lease.context)) return;
     const job = lease.rows.find(job => job.id === lease.desired);
     if (job === undefined || !observableJob(job)) return;
     let output = this.outputs.get(job.id);

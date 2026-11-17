@@ -54,6 +54,15 @@ export interface LogFields {
   readonly wsCloseCode?: number;
   readonly wsCompression?: boolean;
   readonly streamRole?: 'directory' | 'detail' | 'state';
+  readonly streamPurpose?: 'foreground' | 'background' | 'jobs' | 'projections' | 'directory' | 'events' | 'probe';
+  readonly logicalStream?: number;
+  readonly firstItemSeen?: boolean;
+  readonly receivedBytes?: number;
+  readonly receivedItems?: number;
+  readonly firstItemMs?: number;
+  readonly lastFrameAgoMs?: number;
+  readonly carrierIdleMs?: number;
+  readonly recoveryElapsedMs?: number;
   readonly connectionAgeSeconds?: number;
   readonly connectionAborted?: boolean;
   readonly recoveryTarget?: 'server' | 'conversation';
@@ -101,7 +110,7 @@ const ERROR_NAMES = new Set(['Error', 'TypeError', 'SyntaxError', 'RangeError', 
 const REASONS = new Set(['clean-exit', 'abnormal-exit', 'killed', 'crashed', 'oom', 'launch-failed', 'integrity-failure', 'error', 'unhandled-rejection', 'preload-error']);
 const VIEW_TYPES = new Set(['window', 'webview', 'offscreen', 'remote', 'webContentsView', 'browserView', 'backgroundPage']);
 const PROCESS_TYPES = new Set(['GPU', 'Utility', 'Browser', 'Renderer', 'Zygote', 'Sandbox helper', 'Pepper Plugin']);
-const SOURCE_NAMES = '(?:app|auth-service|server-session|credential-store|credential-vault|basic-auth-broker|basic-challenge|ws-handshake|main-window|auth-window|credential-window|fallback-view|session-web-view|background-service|image-size|web-layout-snapshot|auth-page-state|network-check|connection-intents|recovery|file-share-reader|file-input|files|native-policy|native-projections|native-input|native-action-ledger|window-state|ipc-registry|workbench-service|directory-store|session-state|dsh-web-adapter|rpc|read-only-rpc|read-only-mux|pending-interaction|session-cache|session-reconciler|sync-scheduler|pet-companion|pet-window|pet-drag|pet-library|pet-assets|diagnostic-logger|connection-details|app-preload|auth-preload|credential-preload|session-web-preload|workbench)';
+const SOURCE_NAMES = '(?:app|auth-service|server-session|credential-store|credential-vault|basic-auth-broker|basic-challenge|ws-handshake|main-window|auth-window|credential-window|fallback-view|session-web-view|background-service|image-size|web-layout-snapshot|auth-page-state|network-check|connection-intents|recovery|file-share-reader|file-input|files|native-policy|native-projections|native-input|native-action-ledger|window-state|ipc-registry|workbench-service|directory-store|session-state|dsh-web-adapter|rpc|read-only-rpc|read-only-mux|pending-interaction|session-cache|session-reconciler|sync-scheduler|read-admission|background-jobs-reader|job-output-tail|remote-stream|pet-companion|pet-window|pet-drag|pet-library|pet-assets|diagnostic-logger|connection-details|app-preload|auth-preload|credential-preload|session-web-preload|workbench)';
 const FRAME = new RegExp(`^${SOURCE_NAMES}\\.(?:js|cjs|ts):\\d{1,8}:\\d{1,8}$`, 'u');
 const STACK_FRAME = new RegExp(`[/\\\\](${SOURCE_NAMES}\\.(?:js|cjs|ts):\\d{1,8}:\\d{1,8})`, 'gu');
 const MAX_ENTRY_BYTES = 4096;
@@ -114,7 +123,7 @@ export function sanitizeLogFields(value: unknown): Readonly<Record<string, unkno
   for (const key of ['generation', 'workspaceCount', 'sessionCount', 'errorCode', 'exitCode', 'rendererLine', 'rendererColumn'] as const) {
     if (typeof value[key] === 'number' && Number.isSafeInteger(value[key])) fields[key] = value[key];
   }
-  for (const key of ['mainFrame', 'originMatchesBase', 'pathMatchesBase', 'targetLoopback', 'redirectChangesOrigin', 'redirectToLoopback', 'connectionAborted', 'wsCompression'] as const) {
+  for (const key of ['mainFrame', 'originMatchesBase', 'pathMatchesBase', 'targetLoopback', 'redirectChangesOrigin', 'redirectToLoopback', 'connectionAborted', 'wsCompression', 'firstItemSeen'] as const) {
     if (typeof value[key] === 'boolean') fields[key] = value[key];
   }
   if (typeof value.httpStatus === 'number' && Number.isSafeInteger(value.httpStatus) && value.httpStatus >= 100 && value.httpStatus <= 599) fields.httpStatus = value.httpStatus;
@@ -122,6 +131,11 @@ export function sanitizeLogFields(value: unknown): Readonly<Record<string, unkno
   if (typeof value.transportState === 'string' && TRANSPORT_STATES.has(value.transportState as TransportState)) fields.transportState = value.transportState;
   if (typeof value.endpoint === 'string' && ENDPOINTS.has(value.endpoint)) fields.endpoint = value.endpoint;
   if (value.streamRole === 'directory' || value.streamRole === 'detail' || value.streamRole === 'state') fields.streamRole = value.streamRole;
+  if (typeof value.streamPurpose === 'string' && ['foreground', 'background', 'jobs', 'projections', 'directory', 'events', 'probe'].includes(value.streamPurpose)) fields.streamPurpose = value.streamPurpose;
+  for (const [key, maximum] of [['logicalStream', 1000000000], ['receivedBytes', 1099511627776], ['receivedItems', 1000000000],
+    ['firstItemMs', 30000], ['lastFrameAgoMs', 604800000], ['carrierIdleMs', 604800000], ['recoveryElapsedMs', 604800000]] as const) {
+    if (typeof value[key] === 'number' && Number.isSafeInteger(value[key]) && value[key] >= 0 && value[key] <= maximum) fields[key] = value[key];
+  }
   if (typeof value.networkCode === 'string' && NETWORK_ERRORS.has(value.networkCode)) fields.networkCode = value.networkCode;
   if (typeof value.networkProtocol === 'string' && NETWORK_PROTOCOLS.has(value.networkProtocol as NetworkProtocol)) fields.networkProtocol = value.networkProtocol;
   if (typeof value.responseType === 'string' && RESPONSE_TYPES.has(value.responseType as ResponseCategory)) fields.responseType = value.responseType;

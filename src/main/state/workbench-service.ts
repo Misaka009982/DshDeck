@@ -12,6 +12,7 @@ import { projectTasks, SessionStateStore } from './session-state.js';
 import { SessionCache } from '../sync/session-cache.js';
 import { SessionReconciler } from '../sync/session-reconciler.js';
 import { SyncScheduler } from '../sync/sync-scheduler.js';
+import { ReadAdmission } from '../sync/read-admission.js';
 import { DshWebAdapter } from '../protocol/dsh-web-adapter.js';
 import { MockAdapter } from '../protocol/mock-adapter.js';
 import { terminalFromEvent } from '../protocol/wire-values.js';
@@ -52,6 +53,7 @@ export class WorkbenchService {
   private readonly reconciler: SessionReconciler;
   private readonly scheduler: SyncScheduler;
   private readonly jobs: BackgroundJobsReader;
+  private readonly admission = new ReadAdmission();
   private readonly bindings = new Map<string, Binding>();
   private readonly drafts = new Map<string, string>();
   private readonly pending = new Map<string, readonly PendingInteraction[]>();
@@ -68,6 +70,7 @@ export class WorkbenchService {
   private readonly serverRecoveries = new Map<string, RecoveryView>();
   private foregroundRecovery: ForegroundRecovery | undefined;
   private foregroundAttempts = 0;
+  private foregroundRecoveryStartedAt: number | undefined;
   private connectionsRestored = false;
   private readonly suspendedDetails = new Set<string>();
   private readonly recoveryAttempts = new Map<string, number>();
@@ -93,11 +96,11 @@ export class WorkbenchService {
     this.scheduler = new SyncScheduler(async (context, signal) => {
       const binding = this.binding(context);
       try { await this.reconciler.synchronize(context, binding.adapter, AbortSignal.any([signal, binding.signal])); }
-      catch (error) { this.bodyFailed(context, error); throw error; }
-    });
+      catch (error) { if (!signal.aborted && !binding.signal.aborted) this.bodyFailed(context, error, undefined, 'background'); throw error; }
+    }, Date.now, context => this.admission.allow(context, 'background'));
     this.jobs = new BackgroundJobsReader(context => this.jobBinding(context), (context, endpoint, error) => {
-      this.logger?.fault('read-failed', error, { serverId: context.serverId, generation: context.generation, endpoint });
-    });
+      this.logger?.fault('read-failed', error, { serverId: context.serverId, generation: context.generation, endpoint, streamPurpose: 'jobs' });
+    }, Date.now, context => this.admission.allow(context, 'jobs'));
     this.unsubscribed = auth.subscribe(() => this.authChanged());
   }
   async initialize(): Promise<void> { await this.preferences.load(); this.scheduler.setIntervalSeconds(this.preferences.settings().syncIntervalSeconds); this.scheduler.start(); this.changed(); }
@@ -123,7 +126,7 @@ export class WorkbenchService {
     if (this.hasNativePending(scope.serverId, sessionId)) throw new ProtocolFault('conflict');
     const binding = this.bindings.get(scope.serverId);
     if (binding !== undefined && !binding.signal.aborted && binding.scope.authProfileId === scope.authProfileId && binding.scope.generation === scope.generation) binding.adapter.setWebOwner?.({ sessionId });
-    this.webOwner = { scope: { ...scope }, sessionId };
+    this.webOwner = { scope: { ...scope }, sessionId }; this.admission.clear(scope.serverId);
     if (this.foregroundRecovery !== undefined && this.currentIsWebOwned(this.foregroundRecovery.context)) this.clearForegroundRecovery();
     if (this.foreground?.context.serverId === scope.serverId && (sessionId === null || this.foreground.context.sessionId === sessionId)) this.stopForeground();
     this.changed();
@@ -376,7 +379,7 @@ export class WorkbenchService {
       if (!this.currentIsWebOwned(context) && this.foreground === undefined) {
         this.clearForegroundRecovery(); void this.startForeground(context).catch(error => this.bodyFailed(context, error)); this.changed(); return;
       }
-      void this.reconciler.synchronize(context, this.binding(context).adapter, this.binding(context).signal).catch(error => this.bodyFailed(context, error));
+      void this.reconciler.synchronize(context, this.binding(context).adapter, this.binding(context).signal, 'foreground').catch(error => this.bodyFailed(context, error, undefined, 'foreground'));
     } else this.scheduler.request(context);
   }
   async loadOlder(context: SessionContext): Promise<void> {
@@ -510,7 +513,7 @@ export class WorkbenchService {
   }
   private async startForeground(context: SessionContext): Promise<void> {
     if (this.currentIsWebOwned(context)) return;
-    const binding = this.binding(context);
+    const binding = this.binding(context); this.admission.opening(context);
     const controller = new AbortController();
     const foreground: Foreground = { context, controller, subscription: undefined, openingTimer: undefined, startedAt: Date.now() };
     this.foreground = foreground;
@@ -521,14 +524,14 @@ export class WorkbenchService {
         snapshot: snapshot => {
           if (signal.aborted || this.foreground !== foreground || !this.scopeCurrent(context)) return;
           if (foreground.openingTimer !== undefined) clearTimeout(foreground.openingTimer); foreground.openingTimer = undefined;
-          this.cache.applySnapshot(context, snapshot); this.clearForegroundRecovery(false, true);
+          this.cache.applySnapshot(context, snapshot); this.admission.ready(context); this.clearForegroundRecovery(false, true);
           this.failures.delete(this.pref(context)); this.acceptCacheFacts(context);
-          void this.reconciler.repair(context, binding.adapter, signal).catch(error => this.bodyFailed(context, error));
+          void this.reconciler.repair(context, binding.adapter, signal).catch(error => this.bodyFailed(context, error, 'session/events', 'foreground'));
         },
         event: event => {
           if (signal.aborted || this.foreground !== foreground || !this.scopeCurrent(context)) return;
           this.cache.applyEvent(context, event); this.acceptEvent(context, event, true);
-          if (this.cache.get(context)?.hasGap) void this.reconciler.repair(context, binding.adapter, signal).catch(error => this.bodyFailed(context, error));
+          if (this.cache.get(context)?.hasGap) void this.reconciler.repair(context, binding.adapter, signal).catch(error => this.bodyFailed(context, error, 'session/events', 'foreground'));
         },
         assistant: frame => { if (!signal.aborted && this.foreground === foreground && this.scopeCurrent(context)) this.cache.applyAssistant(context, frame); },
         projections: frame => {
@@ -548,23 +551,24 @@ export class WorkbenchService {
   private foregroundFailed(foreground: Foreground, error: unknown): void {
     if (this.foreground !== foreground || foreground.controller.signal.aborted || !this.scopeCurrent(foreground.context)) return;
     const failure = toPublicFailure(error); if (failure.kind === 'cancelled') return;
-    this.bodyFailed(foreground.context, error, 'session/follow');
+    this.bodyFailed(foreground.context, error, 'session/follow', 'foreground');
     if (!['network', 'timeout'].includes(failure.kind) || this.currentIsWebOwned(foreground.context)) { this.clearForegroundRecovery(); if (this.foreground === foreground) this.stopForeground(); return; }
     const binding = this.bindings.get(foreground.context.serverId);
     if (binding === undefined || binding.signal.aborted || this.suspendedDetails.has(foreground.context.serverId)) return;
-    if (Date.now() - foreground.startedAt > 30000) this.foregroundAttempts = 0;
+    if (Date.now() - foreground.startedAt > 30000) { this.foregroundAttempts = 0; this.foregroundRecoveryStartedAt = undefined; }
     this.stopForeground();
     const attempt = this.foregroundAttempts = Math.min(this.foregroundAttempts + 1, 1000000); const delay = recoveryDelayMs(attempt);
-    const recovery: ForegroundRecovery = { context: foreground.context, view: { phase: 'waiting', attempt, limit: null, retryAt: Date.now() + delay }, timer: undefined };
+    const startedAt = this.foregroundRecoveryStartedAt ?? Date.now(); this.foregroundRecoveryStartedAt = startedAt;
+    const recovery: ForegroundRecovery = { context: foreground.context, view: { phase: 'waiting', attempt, limit: null, retryAt: Date.now() + delay, startedAt }, timer: undefined };
     this.foregroundRecovery = recovery;
-    this.logRecovery(foreground.context.serverId, foreground.context.generation, 'conversation', 'waiting', attempt, delay);
+    this.logRecovery(foreground.context.serverId, foreground.context.generation, 'conversation', 'waiting', attempt, delay, startedAt);
     recovery.timer = setTimeout(() => {
       if (this.disposed || this.foregroundRecovery !== recovery) return;
       const selected = this.selection();
       if (selected === null || !sameSession(selected, recovery.context) || this.currentIsWebOwned(selected) || !this.scopeCurrent(selected)
         || this.suspendedDetails.has(selected.serverId) || !this.directory.ready(selected.serverId)) { this.clearForegroundRecovery(); return; }
       recovery.timer = undefined; recovery.view = { ...recovery.view, phase: 'connecting', retryAt: null };
-      this.logRecovery(selected.serverId, selected.generation, 'conversation', 'connecting', attempt); this.changed();
+      this.logRecovery(selected.serverId, selected.generation, 'conversation', 'connecting', attempt, 0, recovery.view.startedAt); this.changed();
       void this.startForeground(selected).catch(error => this.bodyFailed(selected, error));
     }, delay);
     this.changed();
@@ -572,8 +576,8 @@ export class WorkbenchService {
   private clearForegroundRecovery(resetAttempts = true, completed = false): void {
     const recovery = this.foregroundRecovery; this.foregroundRecovery = undefined;
     if (recovery?.timer !== undefined) clearTimeout(recovery.timer);
-    if (recovery !== undefined) this.logRecovery(recovery.context.serverId, recovery.context.generation, 'conversation', completed ? 'ready' : 'cancelled', recovery.view.attempt);
-    if (resetAttempts) this.foregroundAttempts = 0;
+    if (recovery !== undefined) this.logRecovery(recovery.context.serverId, recovery.context.generation, 'conversation', completed ? 'ready' : 'cancelled', recovery.view.attempt, 0, recovery.view.startedAt);
+    if (resetAttempts) { this.foregroundAttempts = 0; this.foregroundRecoveryStartedAt = undefined; this.admission.clear(); }
   }
   private stopForeground(): void {
     const foreground = this.foreground; this.foreground = undefined;
@@ -696,23 +700,26 @@ export class WorkbenchService {
     this.changed();
   }
   private setServerRecovery(serverId: string, recovery: RecoveryView): void {
-    this.serverRecoveries.set(serverId, recovery);
-    this.logRecovery(serverId, this.auth.list().find(server => server.config.id === serverId)?.generation ?? 0, 'server', recovery.phase, recovery.attempt,
-      recovery.retryAt === null ? 0 : Math.max(0, Math.min(30000, recovery.retryAt - Date.now())));
+    const timed = { ...recovery, startedAt: recovery.startedAt ?? this.serverRecoveries.get(serverId)?.startedAt ?? Date.now() };
+    this.serverRecoveries.set(serverId, timed);
+    this.logRecovery(serverId, this.auth.list().find(server => server.config.id === serverId)?.generation ?? 0, 'server', timed.phase, timed.attempt,
+      timed.retryAt === null ? 0 : Math.max(0, Math.min(30000, timed.retryAt - Date.now())), timed.startedAt);
   }
   private clearReconnect(serverId: string, completed = false): void {
     const reconnect = this.reconnects.get(serverId); if (reconnect !== undefined) clearTimeout(reconnect.timer); this.reconnects.delete(serverId);
     const recovery = this.serverRecoveries.get(serverId); this.serverRecoveries.delete(serverId);
-    if (recovery !== undefined) this.logRecovery(serverId, this.auth.list().find(server => server.config.id === serverId)?.generation ?? 0, 'server', completed ? 'ready' : 'cancelled', recovery.attempt);
+    if (recovery !== undefined) this.logRecovery(serverId, this.auth.list().find(server => server.config.id === serverId)?.generation ?? 0, 'server', completed ? 'ready' : 'cancelled', recovery.attempt, 0, recovery.startedAt);
   }
-  private logRecovery(serverId: string, generation: number, target: 'server' | 'conversation', phase: 'waiting' | 'connecting' | 'stopped' | 'ready' | 'cancelled', attempt: number, delay = 0): void {
-    this.logger?.record('info', 'reconnect-state', { serverId, generation, recoveryTarget: target, recoveryPhase: phase, retryAttempt: attempt, retryDelayMs: delay });
+  private logRecovery(serverId: string, generation: number, target: 'server' | 'conversation', phase: 'waiting' | 'connecting' | 'stopped' | 'ready' | 'cancelled', attempt: number, delay = 0, startedAt?: number): void {
+    this.logger?.record('info', 'reconnect-state', { serverId, generation, recoveryTarget: target, recoveryPhase: phase, retryAttempt: attempt, retryDelayMs: delay,
+      ...(startedAt === undefined ? {} : { recoveryElapsedMs: Math.max(0, Date.now() - startedAt) }) });
   }
-  private bodyFailed(context: SessionContext, error: unknown, endpoint?: string): void {
+  private bodyFailed(context: SessionContext, error: unknown, endpoint?: string, purpose?: 'foreground' | 'background'): void {
     if (!this.scopeCurrent(context)) return;
     const failure = toPublicFailure(error);
     if (failure.kind === 'cancelled') return;
-    this.logger?.fault('read-failed', error, { serverId: context.serverId, generation: context.generation, ...(endpoint === undefined ? {} : { endpoint }) });
+    this.logger?.fault('read-failed', error, { serverId: context.serverId, generation: context.generation,
+      ...(endpoint === undefined ? {} : { endpoint }), ...(purpose === undefined ? {} : { streamPurpose: purpose }) });
     this.failures.set(this.pref(context), failure);
     if (['forbidden', 'auth-required', 'login-response'].includes(failure.kind)) {
       this.directory.removeSession(context, context.sessionId); this.state.revoke(context, context.sessionId);
@@ -843,7 +850,7 @@ export class WorkbenchService {
     const last = ledgers[ledgers.length - 1]?.[1];
     return {
       context, title: this.row(context.serverId, context.authProfileId, context.sessionId)?.title ?? context.sessionId,
-      status: cached === undefined ? failure === null ? 'loading' : 'error' : !connected || cached.freshness === 'stale' ? 'stale' : cached.hasGap ? 'gap' : this.foreground !== undefined && sameSession(this.foreground.context, context) ? 'live' : 'cached',
+      status: cached === undefined ? failure === null ? 'loading' : 'error' : !connected || cached.freshness === 'stale' ? 'stale' : cached.hasGap ? 'gap' : this.foreground !== undefined && sameSession(this.foreground.context, context) && this.foreground.openingTimer === undefined ? 'live' : 'cached',
       events: cached?.events ?? [], assistant: cached?.assistant ?? { revision: 0, activeAttempt: null }, cursor: cached?.cursor ?? -1,
       hasMore: cached?.hasMore ?? false, hasGap: cached?.hasGap ?? false, syncedAt: cached?.syncedAt ?? null,
       syncing: cached?.syncing ?? (cached === undefined && failure === null), draft: this.drafts.get(this.pref(context)) ?? '', failure,

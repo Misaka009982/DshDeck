@@ -9,14 +9,14 @@ export class SessionReconciler {
   private readonly flights = new Map<string, { generation: number; controller: AbortController; work: Promise<void> }>();
   private readonly repairs = new Map<string, { generation: number; signal: AbortSignal; work: Promise<void> }>();
   constructor(private readonly cache: SessionCache, private readonly accepted: (context: SessionContext) => void = () => {}) {}
-  synchronize(context: SessionContext, adapter: WorkbenchAdapter, lifetime: AbortSignal): Promise<void> {
+  synchronize(context: SessionContext, adapter: WorkbenchAdapter, lifetime: AbortSignal, purpose: 'foreground' | 'background' = 'background'): Promise<void> {
     const id = preferenceKey(context.serverId, context.authProfileId, context.sessionId);
     const previous = this.flights.get(id);
     if (previous !== undefined && previous.generation === context.generation && !previous.controller.signal.aborted) return previous.work;
     previous?.controller.abort();
     const controller = new AbortController();
     const signal = AbortSignal.any([lifetime, controller.signal]);
-    const work = this.read(context, adapter, signal).finally(() => {
+    const work = this.read(context, adapter, signal, purpose).finally(() => {
       if (this.flights.get(id)?.controller === controller) { this.flights.delete(id); this.cache.setSyncing(context, false); }
     });
     this.flights.set(id, { generation: context.generation, controller, work });
@@ -52,10 +52,10 @@ export class SessionReconciler {
     }
     if (this.cache.get(context)?.hasGap) throw new ProtocolFault('budget');
   }
-  private async read(context: SessionContext, adapter: WorkbenchAdapter, signal: AbortSignal): Promise<void> {
+  private async read(context: SessionContext, adapter: WorkbenchAdapter, signal: AbortSignal, purpose: 'foreground' | 'background'): Promise<void> {
     this.cache.setSyncing(context, true);
     try {
-      const snapshot = await adapter.opening(context.sessionId, signal);
+      const snapshot = await adapter.opening(context.sessionId, signal, purpose);
       if (signal.aborted) throw new ProtocolFault('cancelled');
       this.cache.applySnapshot(context, snapshot);
       this.accepted(context);

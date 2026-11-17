@@ -91,16 +91,16 @@ export class DshWebAdapter implements WorkbenchAdapter {
       if (frame.type === 'event') { requireKeys(frame, ['type', 'event']); callbacks.event(parseWireEvent(frame.event)); }
       else if (frame.type === 'assistant-stream') { requireKeys(frame, ['type', 'frame']); callbacks.assistant(parseAssistantFrame(frame.frame)); }
       else throw new ProtocolFault('protocol');
-    }, callbacks.failed);
+    }, callbacks.failed, 'foreground');
     add(subscription);
     const cancel = (): void => { for (const stream of subscriptions) stream.cancel(); subscriptions.clear(); };
     combined.addEventListener('abort', cancel, { once: true });
     if (combined.aborted) cancel();
     return { cancel: () => { combined.removeEventListener('abort', cancel); cancel(); } };
   }
-  async opening(sessionId: string, signal: AbortSignal): Promise<FollowSnapshot> {
+  async opening(sessionId: string, signal: AbortSignal, purpose: 'foreground' | 'background' = 'background'): Promise<FollowSnapshot> {
     this.assertSession(sessionId);
-    const value = await this.requireMux().readOpening(createReadRequest('session/follow', { sessionId, maxMessages: 40 }), 'detail', AbortSignal.any([this.signal, signal]));
+    const value = await this.requireMux().readOpening(createReadRequest('session/follow', { sessionId, maxMessages: 40 }), 'detail', AbortSignal.any([this.signal, signal]), purpose);
     return parseFollowSnapshot(value, sessionId);
   }
   async history(sessionId: string, beforeSeq: number, throughSeq: number, signal: AbortSignal): Promise<HistoryPage> {

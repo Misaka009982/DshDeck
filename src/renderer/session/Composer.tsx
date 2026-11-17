@@ -6,6 +6,7 @@ import { WorkbenchIcon } from '../ui/WorkbenchIcon.js';
 import { ModelSelector } from './ModelSelector.js';
 import { ContextInspector } from './ContextInspector.js';
 import { GoalTaskDock } from './GoalTaskDock.js';
+import { RuntimeStatus } from './RuntimeStatus.js';
 import { composerActivity } from './composer-model.js';
 import { classifySlash, slashCandidates, slashQuery } from './slash-model.js';
 import type { LocalSlashAction, SlashCandidate } from './slash-model.js';
@@ -99,6 +100,7 @@ export function Composer({ view, store, disabled, running, controlsDisabled = di
   };
   return <footer className="composer-area">
     <GoalTaskDock context={view.context} native={view.native} store={store} disabled={controlsDisabled} panel={panel === 'context' ? null : panel} setPanel={setPanel} />
+    <RuntimeStatus view={view} running={running} />
     <div className="composer-box">
       <div className="composer-input-wrap">
         {menuOpen && <div className="slash-menu" id={menuId} role="listbox" aria-label="斜杠命令">

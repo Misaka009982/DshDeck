@@ -116,6 +116,9 @@ html, body, #root { height: 100%; }
 .streaming-mark { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
 .conversation-empty { color: var(--muted); padding: 55px 0; font-size: 12px; }
 .read-sentinel { height: 2px; }
+.session-runtime { min-width: 0; margin: 0 0 8px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 12px; background: var(--hover); font-size: 11px; color: var(--muted); }
+.session-runtime-clock { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; min-width: 0; }.session-runtime-clock [role="timer"] { font-variant-numeric: tabular-nums; }.session-runtime > small { display: block; margin-top: 5px; font-size: 10px; }
+.model-retry-status { margin-top: 6px; min-width: 0; }.model-retry-status summary { color: var(--text); cursor: pointer; overflow-wrap: anywhere; line-height: 1.6; }.model-retry-status summary > span { color: var(--muted); }.model-retry-status dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 5px 12px; margin: 8px 0 0; }.model-retry-status dd { margin: 0; overflow-wrap: anywhere; }
 .composer-area { position: relative; flex-shrink: 0; min-width: 0; padding: 10px var(--content-gutter) 16px; }
 .composer-insights { width: 100%; max-width: none; margin: 0 0 5px; }
 .composer-options { display: flex; align-items: center; gap: 6px; padding: 8px 11px 0; flex-wrap: wrap; min-width: 0; }

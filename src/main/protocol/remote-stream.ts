@@ -8,15 +8,15 @@ import { jobReadRequest } from './job-policy.js';
 /** 共享同一物理 WS；仅工作台显式开放事件接管，PoC 保持原只读类。 */
 export class RemoteMux extends ReadOnlyMux {
   jobRows(sessionId: string, item: (value: unknown) => void, failed: (fault: ProtocolFault) => void): ReadSubscription {
-    return this.subscribeTrusted(jobReadRequest('job/list', sessionId), 'state', item, failed);
+    return this.subscribeTrusted(jobReadRequest('job/list', sessionId), 'state', item, failed, 'jobs');
   }
   jobOutput(sessionId: string, jobId: string, from: number | undefined, item: (value: unknown) => void, failed: (fault: ProtocolFault) => void): ReadSubscription {
-    return this.subscribeTrusted(jobReadRequest('job/follow', sessionId, jobId, from), 'detail', item, failed);
+    return this.subscribeTrusted(jobReadRequest('job/follow', sessionId, jobId, from), 'detail', item, failed, 'jobs');
   }
   projections(sessionId: string, item: (value: unknown) => void, failed: (fault: ProtocolFault) => void): ReadSubscription {
-    return this.subscribeTrusted(nativeRequest('session/observeProjections', { request: { sessionId } }), 'detail', item, failed);
+    return this.subscribeTrusted(nativeRequest('session/observeProjections', { request: { sessionId } }), 'detail', item, failed, 'projections');
   }
   events(item: (value: unknown) => void, failed: (fault: ProtocolFault) => void): ReadSubscription {
-    return this.subscribeTrusted({ endpoint: REMOTE_EVENT_STREAM_ENDPOINT, payload: REMOTE_EVENT_STREAM_PAYLOAD }, 'state', item, failed);
+    return this.subscribeTrusted({ endpoint: REMOTE_EVENT_STREAM_ENDPOINT, payload: REMOTE_EVENT_STREAM_PAYLOAD }, 'state', item, failed, 'events');
   }
 }

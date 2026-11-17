@@ -140,14 +140,17 @@ export class ServerSession {
     return {
       streamDiagnostic: value => {
         if (generation !== undefined && value.generation !== generation) return;
-        const key = `${value.endpoint}:${value.role}:${value.state}`;
+        const key = `${value.purpose}:${value.endpoint}:${value.role}:${value.state}`;
         if (value.state === 'begin' || value.state === 'open') {
           if (reportedStreams.has(key)) return;
           reportedStreams.add(key);
         }
         this.recordTransport('ws-stream', value.state, { ...navigationFields(this.baseUrl.href, this.config.baseUrl),
           networkProtocol: this.baseUrl.protocol === 'https:' ? 'wss:' : 'ws:', proxyPolicy: this.config.proxyMode ?? 'system',
-          generation: value.generation, endpoint: value.endpoint, streamRole: value.role,
+          generation: value.generation, endpoint: value.endpoint, streamRole: value.role, streamPurpose: value.purpose,
+          logicalStream: value.logicalStream, firstItemSeen: value.firstItemSeen, receivedBytes: value.receivedBytes, receivedItems: value.receivedItems,
+          carrierIdleMs: value.carrierIdleMs, ...(value.firstItemMs === undefined ? {} : { firstItemMs: value.firstItemMs }),
+          ...(value.lastFrameAgoMs === undefined ? {} : { lastFrameAgoMs: value.lastFrameAgoMs }),
           ...(value.elapsedMs <= 30000 ? { elapsedMs: value.elapsedMs } : {}), ...(value.failureKind === undefined ? {} : { failureKind: value.failureKind }) });
       },
       fetch: async (input, init) => {

@@ -48,9 +48,7 @@ export function timelineFromView(view: RuntimeSource): RuntimeTimeline {
           || data.mode !== 'normal' && data.mode !== 'always' || data.mode === 'normal' && (limit === null || count > limit)
           || typeof failure.message !== 'string' || typeof failure.code !== 'string') continue;
         retry = { id, turn: eventTurn, step: eventStep, count, limit, scheduledAt: time, delayMs, reason: retryReason(failure), requestStartedAt: null };
-      } else if (retry !== null && data.retryId === retry.id && data.retry === retry.count && eventTurn === retry.turn && eventStep === retry.step) {
-        retry = { ...retry, requestStartedAt: time };
-      }
+      } else retry = retryStarted(retry, data, time);
     }
   }
   const active = view.assistant.activeAttempt;
@@ -74,6 +72,10 @@ export function runtimeFromView(view: RuntimeSource, running: boolean, now = Dat
 export function runtimeDuration(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000)); const hours = Math.floor(total / 3600); const minutes = Math.floor(total % 3600 / 60); const seconds = total % 60;
   return `${hours > 0 ? `${hours} 小时 ` : ''}${minutes > 0 || hours > 0 ? `${minutes} 分 ` : ''}${seconds} 秒`;
+}
+function retryStarted(previous: RetryTimeline | null, data: Record<string, unknown>, time: number): RetryTimeline | null {
+  if (previous === null || data.retryId !== previous.id || data.retry !== previous.count || data.turn !== previous.turn || data.step !== previous.step) return previous;
+  return { ...previous, requestStartedAt: time };
 }
 function retryReason(failure: Record<string, unknown>): string {
   const message = typeof failure.message === 'string' ? failure.message.slice(0, 2048) : '';

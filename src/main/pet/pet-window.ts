@@ -10,8 +10,8 @@ import { DEFAULT_PET_DISPLAY, petWindowGeometry } from '../../shared/pet-display
 import { PET_DRAG_MAX_MS, PetDragState, parsePetDragRequest } from '../../shared/pet-drag.js';
 import type { PetPoint } from '../../shared/pet-drag.js';
 import type { PetDisplaySettings } from '../../shared/pet-display.js';
-import { PET_APP_SCHEME, PET_ASSET_SCHEME, PET_PAGE_URL } from '../../shared/pet-view.js';
-import type { PetViewConfig, PetViewSnapshot } from '../../shared/pet-view.js';
+import { PET_APP_SCHEME, PET_ASSET_SCHEME, PET_PAGE_URL, parsePetMouseRegion, petMouseInteractive } from '../../shared/pet-view.js';
+import type { PetViewConfig, PetViewSnapshot, PetMouseRegion } from '../../shared/pet-view.js';
 import { localWebPreferences } from '../windows/security-options.js';
 import type { WindowAssets } from '../windows/window-assets.js';
 import type { IpcRegistry } from '../security/ipc-registry.js';
@@ -38,6 +38,7 @@ export class PetWindow {
   private assetEpoch = 0;
   private windowEpoch = 0;
   private rendererReady = false;
+  private mouseRegion: PetMouseRegion = 'none';
   private stopping = false;
   private disposed = false;
   private geometryKey = '';
@@ -112,7 +113,7 @@ export class PetWindow {
       hasShadow: false, backgroundColor: '#00000000',
       webPreferences: { ...localWebPreferences(this.partition, join(this.assets.preloadRoot, 'pet-preload.cjs')), session: this.browserSession, devTools: false },
     });
-    this.window = win; this.rendererReady = false; this.geometryKey = ''; win.setMenuBarVisibility(false); win.setIgnoreMouseEvents(true, { forward: true });
+    this.window = win; this.rendererReady = false; this.mouseRegion = 'none'; this.geometryKey = ''; win.setMenuBarVisibility(false); win.setIgnoreMouseEvents(true, { forward: true });
     win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     win.webContents.on('will-navigate', event => event.preventDefault()); win.webContents.on('will-attach-webview', event => event.preventDefault());
     win.webContents.on('render-process-gone', () => { if (this.window === win) this.hooks.failed(new ProtocolFault('network')); });
@@ -132,10 +133,9 @@ export class PetWindow {
         return { config: this.config, snapshot: this.snapshot };
       },
       'pet:mouse-interactive': value => {
-        if (typeof value !== 'boolean') throw new ProtocolFault('protocol');
+        const region = parsePetMouseRegion(value);
         if (this.window !== win || win.isDestroyed()) throw new ProtocolFault('cancelled');
-        const interactive = this.rendererReady && this.config.visible && (this.dragState.matches() || value);
-        win.setIgnoreMouseEvents(!interactive, { forward: true });
+        this.mouseRegion = region; this.applyMouseRegion(win);
       },
       'pet:drag': value => this.drag(win, value),
       'pet:action': value => {
@@ -175,6 +175,12 @@ export class PetWindow {
     screen.removeListener('display-added', this.displayChanged); screen.removeListener('display-removed', this.displayChanged); screen.removeListener('display-metrics-changed', this.displayChanged);
     nativeTheme.removeListener('updated', this.themeChanged);
   }
+  private applyMouseRegion(win: BrowserWindow): void {
+    if (this.window !== win || win.isDestroyed()) return;
+    const interactive = this.rendererReady && this.config.visible
+      && (!this.config.settings.lockPosition && this.dragState.matches() || petMouseInteractive(this.mouseRegion, this.config.settings.lockPosition));
+    win.setIgnoreMouseEvents(!interactive, { forward: true });
+  }
   private applyConfig(): void {
     const win = this.window;
     this.config = { ...this.config, visible: !(this.hostFullscreen && this.config.settings.autoHideFullscreen),
@@ -193,6 +199,7 @@ export class PetWindow {
       win.webContents.setZoomFactor(geometry.scale);
     }
     win.setAlwaysOnTop(this.config.settings.alwaysOnTop, 'floating'); win.setMovable(!this.config.settings.lockPosition);
+    this.applyMouseRegion(win);
     if (this.rendererReady && this.config.visible) { if (!win.isVisible()) win.showInactive(); }
     else { win.setIgnoreMouseEvents(true, { forward: true }); win.hide(); }
     if (this.rendererReady) win.webContents.send('pet:config', this.config);
@@ -269,6 +276,6 @@ export class PetWindow {
   }
   private clearTimers(): void {
     clearTimeout(this.moveTimer); clearTimeout(this.dragTimer); clearTimeout(this.startupTimer);
-    this.moveTimer = undefined; this.dragTimer = undefined; this.startupTimer = undefined; this.dragState.end();
+    this.moveTimer = undefined; this.dragTimer = undefined; this.startupTimer = undefined; this.dragState.end(); this.mouseRegion = 'none';
   }
 }

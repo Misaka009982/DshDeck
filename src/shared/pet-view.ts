@@ -29,6 +29,15 @@ export interface PetViewConfig {
   readonly language: 'zh-CN'; readonly visible: boolean; readonly theme: 'light' | 'dark';
   readonly settings: PetDisplaySettings; readonly pet: PetViewAsset | null;
 }
+export type PetMouseRegion = 'none' | 'body' | 'controls';
+export function parsePetMouseRegion(value: unknown): PetMouseRegion {
+  if (value !== 'none' && value !== 'body' && value !== 'controls') throw new ProtocolFault('protocol');
+  return value;
+}
+/** 锁定主体穿透，灯／气泡／按钮仍可点击；运行器另校验当前可见与拖动状态。 */
+export function petMouseInteractive(region: PetMouseRegion, locked: boolean): boolean {
+  return region === 'controls' || region === 'body' && !locked;
+}
 export type NativePetAction =
   | { readonly actionId: string; readonly snapshotRevision: number; readonly kind: 'open-task'; readonly taskId: string }
   | { readonly actionId: string; readonly snapshotRevision: number; readonly kind: 'open-settings' | 'open-licenses' | 'close-pet' };
@@ -47,7 +56,7 @@ export function parseNativePetAction(value: unknown, snapshotRevision: number): 
 /** 此 bridge 仅绑定宠物本地主框架，不能读取文件、认证材料或提交会话输入。 */
 export interface PetBridge {
   ready(): Promise<IpcResult<{ readonly config: PetViewConfig; readonly snapshot: PetViewSnapshot }>>;
-  setMouseInteractive(interactive: boolean): Promise<IpcResult<void>>;
+  setMouseInteractive(region: PetMouseRegion): Promise<IpcResult<void>>;
   drag(input: PetDragRequest): Promise<IpcResult<boolean>>;
   action(input: NativePetAction): Promise<IpcResult<void>>;
   onDragEnded(listener: (gestureId: string) => void): () => void;

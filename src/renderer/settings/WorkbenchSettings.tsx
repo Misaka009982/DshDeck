@@ -34,7 +34,7 @@ export function WorkbenchSettingsDialog({ snapshot, store, open, close }: { read
       {snapshot.pet.truncated && <p className="muted small" role="status">扫描达到安全上限；请缩小宠物库目录，当前结果不代表全部资源。</p>}
       <label>宠物大小 · {snapshot.pet.display.size}%<input type="range" min={50} max={200} step={5} value={snapshot.pet.display.size} onChange={event => { void store.action(store.api.updatePetDisplay({ size: Number(event.target.value) })); }} /></label>
       <div className="pet-display-options">{([
-        ['alwaysOnTop', '窗口置顶'], ['lockPosition', '锁定位置'], ['showTaskArea', '显示关注任务灯与列表'], ['openOnHover', '悬浮展开任务'],
+        ['alwaysOnTop', '窗口置顶'], ['lockPosition', '锁定位置（主体穿透）'], ['showTaskArea', '显示关注任务灯与列表'], ['openOnHover', '悬停状态灯展开会话'],
         ['showStatus', '显示状态标签'], ['showCliLabel', '显示任务来源'], ['notificationsEnabled', '显示宠物提醒'], ['soundEnabled', '宠物声音（默认关闭）'],
         ['autoHideFullscreen', '主窗口全屏时隐藏'],
       ] as const).map(([key, label]) => <label className="checkbox-setting" key={key}><input type="checkbox" checked={snapshot.pet.display[key]} onChange={event => { void store.action(store.api.updatePetDisplay({ [key]: event.target.checked })); }} />{label}</label>)}</div>

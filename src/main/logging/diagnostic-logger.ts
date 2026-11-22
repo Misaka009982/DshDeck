@@ -10,7 +10,7 @@ import type { AddressKind, NetworkCode, NetworkProtocol, ResponseCategory } from
 export type LogLevel = 'info' | 'warn' | 'error';
 export type LogEvent = 'app-start' | 'app-ready' | 'app-quitting' | 'startup-failed' | 'main-fatal'
   | 'connection-state' | 'ipc-complete' | 'ipc-failed' | 'read-failed' | 'carrier-failed'
-  | 'renderer-gone' | 'renderer-failed' | 'child-process-gone' | 'page-load-failed' | 'transport-state' | 'web-view-state' | 'background-failed' | 'web-layout-cached' | 'window-state-failed' | 'connection-intent-failed' | 'reconnect-state';
+  | 'renderer-gone' | 'renderer-failed' | 'child-process-gone' | 'page-load-failed' | 'transport-state' | 'web-view-state' | 'background-failed' | 'web-layout-cached' | 'window-state-failed' | 'connection-intent-failed' | 'reconnect-state' | 'session-context';
 export type ConnectionStep = 'http-proxy' | 'http-auth-check' | 'http-request' | 'http-response' | 'ws-proxy' | 'ws-handshake' | 'auth-navigation' | 'auth-finish' | 'line-tcp' | 'line-http' | 'ws-carrier' | 'ws-stream';
 export type TransportState = 'begin' | 'headers' | 'open' | 'complete' | 'failed' | 'cancelled' | 'blocked';
 export interface SoftwareInfo {
@@ -70,6 +70,7 @@ export interface LogFields {
   readonly retryAttempt?: number;
   readonly retryDelayMs?: number;
   readonly webState?: 'closed' | 'loading' | 'ready' | 'failed';
+  readonly contextReason?: 'runtime-detached' | 'passive-missing' | 'directory-absent' | 'archived' | 'access-denied';
   readonly originMatchesBase?: boolean;
   readonly pathMatchesBase?: boolean;
   readonly targetLoopback?: boolean;
@@ -86,7 +87,7 @@ interface LogEntry {
 interface LogOptions { readonly enabled?: boolean; readonly maxFileBytes?: number; readonly backups?: number; readonly historyLimit?: number }
 export const DEFAULT_LOG_OPTIONS = { enabled: true, maxFileBytes: 2 * 1024 * 1024, backups: 3, historyLimit: 120 } as const;
 const EVENTS = new Set<LogEvent>(['app-start', 'app-ready', 'app-quitting', 'startup-failed', 'main-fatal', 'connection-state',
-  'ipc-complete', 'ipc-failed', 'read-failed', 'carrier-failed', 'renderer-gone', 'renderer-failed', 'child-process-gone', 'page-load-failed', 'transport-state', 'web-view-state', 'background-failed', 'web-layout-cached', 'window-state-failed', 'connection-intent-failed', 'reconnect-state']);
+  'ipc-complete', 'ipc-failed', 'read-failed', 'carrier-failed', 'renderer-gone', 'renderer-failed', 'child-process-gone', 'page-load-failed', 'transport-state', 'web-view-state', 'background-failed', 'web-layout-cached', 'window-state-failed', 'connection-intent-failed', 'reconnect-state', 'session-context']);
 const STEPS = new Set<ConnectionStep>(['http-proxy', 'http-auth-check', 'http-request', 'http-response', 'ws-proxy', 'ws-handshake', 'auth-navigation', 'auth-finish', 'line-tcp', 'line-http', 'ws-carrier', 'ws-stream']);
 const TRANSPORT_STATES = new Set<TransportState>(['begin', 'headers', 'open', 'complete', 'failed', 'cancelled', 'blocked']);
 const NETWORK_ERRORS = new Set<string>(NETWORK_CODES);
@@ -152,6 +153,7 @@ export function sanitizeLogFields(value: unknown): Readonly<Record<string, unkno
   if (typeof value.recoveryPhase === 'string' && ['waiting', 'connecting', 'stopped', 'ready', 'cancelled'].includes(value.recoveryPhase)) fields.recoveryPhase = value.recoveryPhase;
   if (typeof value.state === 'string' && STATES.has(value.state as ConnectionState)) fields.state = value.state;
   if (value.webState === 'closed' || value.webState === 'loading' || value.webState === 'ready' || value.webState === 'failed') fields.webState = value.webState;
+  if (typeof value.contextReason === 'string' && ['runtime-detached', 'passive-missing', 'directory-absent', 'archived', 'access-denied'].includes(value.contextReason)) fields.contextReason = value.contextReason;
   if (typeof value.failureKind === 'string' && FAULTS.has(value.failureKind)) fields.failureKind = value.failureKind;
   if (typeof value.operation === 'string' && OPERATIONS.has(value.operation)) fields.operation = value.operation;
   if (typeof value.reason === 'string' && REASONS.has(value.reason)) fields.reason = value.reason;

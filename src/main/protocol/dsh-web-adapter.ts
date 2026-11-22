@@ -312,7 +312,13 @@ export class DshWebAdapter implements WorkbenchAdapter {
       this.summaries = this.summaries.map(session => session.sessionId === args[0] ? { ...session, running: args[1] as boolean } : session);
     } else if (event === 'api-session/removed') {
       if (args.length !== 1) throw new ProtocolFault('protocol');
-      const id = requireId(args[0]); this.stateRetries.delete(id); this.summaries = this.summaries.filter(session => session.sessionId !== id); this.callbacks.removed(id);
+      const id = requireId(args[0]);
+      // 退出内存实例不等于持久会话被删除；先失效旧状态样本，再核对授权目录。
+      if (this.summaries.some(session => session.sessionId === id)) {
+        this.summaries = this.summaries.map(session => session.sessionId === id ? { ...session } : session);
+        this.callbacks.directoryHint?.(id);
+      }
+      void this.refreshSessions().catch(fault => this.fail(asFault(fault)));
     } else if (event === 'api-session/added' || event === 'api-session/activity') {
       void this.refreshSessions().catch(fault => this.fail(asFault(fault)));
     } else if (['llm/adapters-updated', 'llm/models-updated', 'settings/document-updated', 'credentials/record-updated', 'credentials/reference-updated'].includes(event)) {
@@ -325,9 +331,14 @@ export class DshWebAdapter implements WorkbenchAdapter {
   private async refreshSessions(): Promise<void> {
     if (this.refreshPending !== undefined) return this.refreshPending;
     const work = (async () => {
-      this.summaries = parseSessionList(await this.read(createReadRequest('session/list'), this.signal));
-      const ids = new Set(this.summaries.map(session => session.sessionId));
+      const sessions = parseSessionList(await this.read(createReadRequest('session/list'), this.signal));
+      if (this.signal.aborted || this.disposed) return;
+      const ids = new Set(sessions.map(session => session.sessionId));
+      const removed = this.summaries.filter(session => !ids.has(session.sessionId));
+      this.summaries = sessions;
       for (const id of this.stateRetries.keys()) if (!ids.has(id)) this.stateRetries.delete(id);
+      // 只有完整授权目录确认缺失，才允许调用方清理该会话的正文与路由。
+      for (const session of removed) this.callbacks.removed(session.sessionId);
       this.callbacks.sessions(this.summaries);
     })();
     this.refreshPending = work;
@@ -346,20 +357,20 @@ export class DshWebAdapter implements WorkbenchAdapter {
     const worker = async (): Promise<void> => {
       while (next < queue.length && !this.signal.aborted) {
         const session = queue[next++]; if (session === undefined) return;
+        if (this.summaries.find(item => item.sessionId === session.sessionId) !== session) continue;
         try {
           const state = parsePassiveState(await this.read(createReadRequest('session/state', { sessionId: session.sessionId }), this.signal));
           if (this.signal.aborted || this.disposed) return;
-          if (!this.summaries.some(item => item.sessionId === session.sessionId)) continue;
+          if (this.summaries.find(item => item.sessionId === session.sessionId) !== session) continue;
           this.stateRetries.delete(session.sessionId);
           this.callbacks.state(session.sessionId, state);
         } catch (error) {
           if (this.signal.aborted || this.disposed) return;
-          if (!this.summaries.some(item => item.sessionId === session.sessionId)) continue;
+          if (this.summaries.find(item => item.sessionId === session.sessionId) !== session) continue;
           const fault = asFault(error);
-          if (fault.kind === 'not-found') { this.stateRetries.delete(session.sessionId); this.summaries = this.summaries.filter(item => item.sessionId !== session.sessionId); this.callbacks.removed(session.sessionId); continue; }
           if (fault.kind === 'unsupported') { this.statePolling = false; return; }
-          if (fault.kind === 'network' || fault.kind === 'timeout') {
-            // 状态 HTTP 的局部抖动不等于认证 WS 失效，不能取消健康的正文／任务逻辑流。
+          if (fault.kind === 'network' || fault.kind === 'timeout' || fault.kind === 'not-found') {
+            // HTTP 404 或被动状态缺失不能单独证明会话被删除，也不取消健康正文／任务流。
             const attempt = Math.min((this.stateRetries.get(session.sessionId)?.attempt ?? 0) + 1, 1000000);
             this.stateRetries.set(session.sessionId, { attempt, retryAt: Date.now() + recoveryDelayMs(attempt) });
             this.callbacks.stateFailed?.(session.sessionId, fault); continue;

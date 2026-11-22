@@ -11,6 +11,7 @@ export interface AdapterCallbacks {
   readonly workspaces: (frame: WorkspaceReadFrame) => void;
   readonly sessions: (sessions: readonly DirectorySession[]) => void;
   readonly removed: (sessionId: string) => void;
+  readonly directoryHint?: (sessionId: string) => void;
   readonly running: (sessionId: string, running: boolean) => void;
   readonly state: (sessionId: string, state: { cursor: number; active: boolean; running: boolean; pendingInput: readonly string[] }) => void;
   readonly stateFailed?: (sessionId: string, fault: ProtocolFault) => void;

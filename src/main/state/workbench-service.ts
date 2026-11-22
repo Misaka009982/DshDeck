@@ -496,10 +496,17 @@ export class WorkbenchService {
           pendingIds: pending.length > 0 ? pending : state.pendingInput.map((kind, index) => `state:${kind}:${index}`) });
         this.primeRead(scope, sessionId, state.cursor); if (changed) this.changed();
       },
+      directoryHint: sessionId => {
+        if (!this.scopeCurrent(scope)) return;
+        this.state.markSessionStale(scope, sessionId);
+        this.logger?.record('info', 'session-context', { serverId: scope.serverId, generation: scope.generation, contextReason: 'runtime-detached' });
+        this.changed();
+      },
       stateFailed: (sessionId, fault) => {
         if (!this.scopeCurrent(scope)) return;
         if (this.state.markSessionStale(scope, sessionId)) this.changed();
-        this.logger?.fault('read-failed', fault, { serverId: scope.serverId, generation: scope.generation, endpoint: 'session/state' });
+        this.logger?.fault('read-failed', fault, { serverId: scope.serverId, generation: scope.generation, endpoint: 'session/state',
+          ...(fault.kind === 'not-found' ? { contextReason: 'passive-missing' as const } : {}) });
       },
       pending: pending => {
         if (!this.scopeCurrent(scope)) return;
@@ -719,7 +726,8 @@ export class WorkbenchService {
     const failure = toPublicFailure(error);
     if (failure.kind === 'cancelled') return;
     this.logger?.fault('read-failed', error, { serverId: context.serverId, generation: context.generation,
-      ...(endpoint === undefined ? {} : { endpoint }), ...(purpose === undefined ? {} : { streamPurpose: purpose }) });
+      ...(endpoint === undefined ? {} : { endpoint }), ...(purpose === undefined ? {} : { streamPurpose: purpose }),
+      ...(['forbidden', 'auth-required', 'login-response'].includes(failure.kind) ? { contextReason: 'access-denied' as const } : {}) });
     this.failures.set(this.pref(context), failure);
     if (['forbidden', 'auth-required', 'login-response'].includes(failure.kind)) {
       this.directory.removeSession(context, context.sessionId); this.state.revoke(context, context.sessionId);
@@ -809,6 +817,8 @@ export class WorkbenchService {
       && this.directory.scope(saved.serverId)?.authProfileId === saved.authProfileId
       && (this.directory.session(saved.serverId, saved.sessionId) === undefined || this.directory.archived(saved.serverId, saved.sessionId))) {
       // 离线保留缓存；已确认删除或归档则撤销选择，不留可点击的旧人工输入。
+      this.logger?.record('info', 'session-context', { serverId: saved.serverId, generation: this.directory.scope(saved.serverId)?.generation ?? saved.generation,
+        contextReason: this.directory.archived(saved.serverId, saved.sessionId) ? 'archived' : 'directory-absent' });
       this.jobs.removed(saved.serverId, saved.sessionId); this.cancelFileViews(saved.serverId); this.clearForegroundRecovery(); this.stopForeground(); this.focus.clear(saved.serverId); this.lastSelection = null; this.cache.protect(null);
     }
     const selected = this.focus.current();
